@@ -124,31 +124,7 @@ function cellBg(streak: number, color: HabitColor): string {
 // ─── Demo data ────────────────────────────────────────────────────────────────
 
 function generateDemo(): Habit[] {
-  const base = todayNoon();
-  const templates: Array<{ name: string; color: HabitColor; rate: number; skipRate?: number }> = [
-    { name: 'read 10 pages',     color: 'green',  rate: 0.85, skipRate: 0.05 },
-    { name: 'learn french',      color: 'green',  rate: 0.72 },
-    { name: '50 pushups',        color: 'green',  rate: 0.80 },
-    { name: 'play the guitar',   color: 'green',  rate: 0.97 },
-    { name: 'meet new people',   color: 'green',  rate: 0.55 },
-    { name: 'meditate 5 min',    color: 'green',  rate: 0.65 },
-    { name: '3 business ideas',  color: 'blue',   rate: 0.82 },
-    { name: 'cook healthy food', color: 'yellow', rate: 0.75 },
-    { name: 'eat a fruit',       color: 'orange', rate: 0.87 },
-    { name: 'sleep at 11pm',     color: 'red',    rate: 0.62 },
-  ];
-  let seed = 0xDEADBEEF;
-  const rand = () => { seed = Math.imul(1664525, seed) + 1013904223 >>> 0; return seed / 0x100000000; };
-  return templates.map(({ name, color, rate, skipRate = 0 }) => {
-    const completions: string[] = [], skips: string[] = [];
-    for (let i = 89; i >= 0; i--) {
-      const d = new Date(base); d.setDate(d.getDate() - i);
-      const r = rand();
-      if (r < rate) completions.push(fmt(d));
-      else if (r < rate + skipRate) skips.push(fmt(d));
-    }
-    return { id: `h-${name.replace(/\s+/g, '-')}`, name, color, completions, skips };
-  });
+  return []; // start fresh — no sample data
 }
 
 function loadHabits(): Habit[] {
@@ -444,7 +420,7 @@ export default function App() {
         <div className="user-bar">
           <TrophyIcon />
           <span className="score">{totalScore}</span>
-          <span className="username">Joan ▾</span>
+          <span className="username">Kevin ▾</span>
         </div>
       </header>
 
