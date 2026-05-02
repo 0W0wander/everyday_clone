@@ -25,13 +25,28 @@ const COLOR_ACCENT: Record<HabitColor, string> = {
 const MONTHS      = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 const DAYS        = ['SUN','MON','TUE','WED','THU','FRI','SAT'];
 const HABIT_COLORS: HabitColor[] = ['green','blue','yellow','orange','red','purple','teal'];
-const DAYS_BACK   = 13;
 const STORAGE_KEY = 'everyday-habits-v2';
 
-const W_NAME  = 162;
-const W_DAY   = 46;
-const W_TODAY = 90;
-const W_STAT  = 52; // narrower — matches real app's compact stats panel
+// Responsive layout config — recomputed when viewport changes
+interface Layout {
+  daysBack: number;
+  wName:  number;
+  wDay:   number;
+  wToday: number;
+  wStat:  number;
+  rowH:   number;
+  isMobile: boolean;
+}
+
+function getLayout(width: number): Layout {
+  if (width < 640) {
+    return { daysBack: 5, wName: 100, wDay: 30, wToday: 50, wStat: 38, rowH: 44, isMobile: true };
+  }
+  if (width < 900) {
+    return { daysBack: 9, wName: 130, wDay: 38, wToday: 70, wStat: 46, rowH: 42, isMobile: false };
+  }
+  return { daysBack: 13, wName: 175, wDay: 46, wToday: 90, wStat: 52, rowH: 42, isMobile: false };
+}
 
 // ─── Analytics helpers ────────────────────────────────────────────────────────
 
@@ -66,13 +81,24 @@ function todayNoon(): Date {
 }
 function fmt(d: Date): string { return d.toISOString().split('T')[0]; }
 
-function getVisibleDates(offset: number): Date[] {
+function getVisibleDates(offset: number, daysBack: number): Date[] {
   const base = todayNoon();
-  return Array.from({ length: DAYS_BACK + 1 }, (_, i) => {
+  return Array.from({ length: daysBack + 1 }, (_, i) => {
     const d = new Date(base);
-    d.setDate(d.getDate() - (DAYS_BACK - i) - offset);
+    d.setDate(d.getDate() - (daysBack - i) - offset);
     return d;
   });
+}
+
+// Track viewport width so layout can be responsive
+function useViewportWidth(): number {
+  const [w, setW] = useState(() => typeof window !== 'undefined' ? window.innerWidth : 1024);
+  useEffect(() => {
+    const h = () => setW(window.innerWidth);
+    window.addEventListener('resize', h);
+    return () => window.removeEventListener('resize', h);
+  }, []);
+  return w;
 }
 
 // ─── Streak helpers ───────────────────────────────────────────────────────────
@@ -337,8 +363,12 @@ export default function App() {
   const [editAnchorRect, setEditAnchorRect] = useState<DOMRect | null>(null);
   const [analyticsView,  setAnalyticsView]  = useState<0 | 1 | 2>(0);
   const addInputRef = useRef<HTMLInputElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const dates        = useMemo(() => getVisibleDates(offset), [offset]);
+  const vw     = useViewportWidth();
+  const layout = useMemo(() => getLayout(vw), [vw]);
+
+  const dates        = useMemo(() => getVisibleDates(offset, layout.daysBack), [offset, layout.daysBack]);
   const isCurrentDay = offset === 0;
 
   useEffect(() => { localStorage.setItem(STORAGE_KEY, JSON.stringify(habits)); }, [habits]);
@@ -384,8 +414,8 @@ export default function App() {
       return arr;
     });
     // Shift the anchor rect by one row height so the panel follows
-    setEditAnchorRect(r => r ? new DOMRect(r.x, r.y + dir * 38, r.width, r.height) : r);
-  }, [editingId]);
+    setEditAnchorRect(r => r ? new DOMRect(r.x, r.y + dir * layout.rowH, r.width, r.height) : r);
+  }, [editingId, layout.rowH]);
 
   const cancelEdit = useCallback(() => {
     setEditingId(null); setEditAnchorRect(null);
@@ -398,15 +428,42 @@ export default function App() {
   const totalScore = useMemo(() => habits.reduce((s, h) => s + h.completions.length, 0), [habits]);
   const dailyCount = useCallback((ds: string) => habits.filter(h => h.completions.includes(ds)).length, [habits]);
 
+  const { wName, wDay, wToday, wStat, daysBack, rowH, isMobile } = layout;
   const gridCols = isCurrentDay
-    ? `${W_NAME}px repeat(${DAYS_BACK}, ${W_DAY}px) ${W_TODAY}px repeat(3, ${W_STAT}px)`
-    : `${W_NAME}px repeat(${DAYS_BACK + 1}, ${W_DAY}px) repeat(3, ${W_STAT}px)`;
+    ? `${wName}px repeat(${daysBack}, ${wDay}px) ${wToday}px repeat(3, ${wStat}px)`
+    : `${wName}px repeat(${daysBack + 1}, ${wDay}px) repeat(3, ${wStat}px)`;
+
+  // Export / import for cross-device data transfer
+  const exportData = useCallback(() => {
+    const blob = new Blob([JSON.stringify(habits, null, 2)], { type: 'application/json' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href = url;
+    a.download = `everyday-${fmt(todayNoon())}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [habits]);
+
+  const importData = useCallback((file: File) => {
+    const reader = new FileReader();
+    reader.onload = e => {
+      try {
+        const parsed = JSON.parse(e.target?.result as string) as Habit[];
+        if (!Array.isArray(parsed)) throw new Error('Invalid format');
+        const ok = window.confirm(`Replace your current data with ${parsed.length} habits from this file?`);
+        if (ok) setHabits(parsed.map(h => ({ ...h, skips: h.skips ?? [] })));
+      } catch {
+        alert('Could not read this file. Make sure it\'s a valid Everyday export.');
+      }
+    };
+    reader.readAsText(file);
+  }, []);
 
   const editingHabit = editingId ? habits.find(h => h.id === editingId) : null;
   const editingIdx   = editingId ? habits.findIndex(h => h.id === editingId) : -1;
 
   return (
-    <div className="app">
+    <div className={`app${isMobile ? ' mobile' : ''}`} style={{ '--row-h': `${rowH}px` } as React.CSSProperties}>
       {/* ── App bar ── */}
       <header className="appbar">
         <div className="logo">
@@ -418,9 +475,26 @@ export default function App() {
           <button className="nav-btn" onClick={() => setOffset(o => Math.max(0, o - 1))} disabled={offset === 0}>›</button>
         </div>
         <div className="user-bar">
+          <button className="data-btn" onClick={exportData} title="Export your habits">
+            <DownloadIcon />
+          </button>
+          <button className="data-btn" onClick={() => fileInputRef.current?.click()} title="Import habits from file">
+            <UploadIcon />
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="application/json"
+            style={{ display: 'none' }}
+            onChange={e => {
+              const f = e.target.files?.[0];
+              if (f) importData(f);
+              e.target.value = '';
+            }}
+          />
           <TrophyIcon />
           <span className="score">{totalScore}</span>
-          <span className="username">Kevin ▾</span>
+          {!isMobile && <span className="username">Kevin ▾</span>}
         </div>
       </header>
 
@@ -617,6 +691,26 @@ function ArrowDownIcon() {
     <svg width="11" height="11" viewBox="0 0 24 24" fill="none"
       stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
       <path d="M12 5v14M19 12l-7 7-7-7"/>
+    </svg>
+  );
+}
+function DownloadIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+      <polyline points="7 10 12 15 17 10"/>
+      <line x1="12" y1="15" x2="12" y2="3"/>
+    </svg>
+  );
+}
+function UploadIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+      <polyline points="17 8 12 3 7 8"/>
+      <line x1="12" y1="3" x2="12" y2="15"/>
     </svg>
   );
 }
