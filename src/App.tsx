@@ -4,6 +4,7 @@ import {
 import { createPortal } from 'react-dom';
 import './App.css';
 import type { Habit, HabitColor } from './types';
+import { fetchRemote, pushRemote, isSyncConfigured } from './sync';
 
 // ─── Palettes ────────────────────────────────────────────────────────────────
 
@@ -362,8 +363,11 @@ export default function App() {
   const [editingId,      setEditingId]      = useState<string | null>(null);
   const [editAnchorRect, setEditAnchorRect] = useState<DOMRect | null>(null);
   const [analyticsView,  setAnalyticsView]  = useState<0 | 1 | 2>(0);
-  const addInputRef = useRef<HTMLInputElement>(null);
+  const [syncStatus,     setSyncStatus]     = useState<'idle'|'syncing'|'synced'|'error'>('idle');
+  const addInputRef  = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const syncTimer    = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isFirstLoad  = useRef(true);
 
   const vw     = useViewportWidth();
   const layout = useMemo(() => getLayout(vw), [vw]);
@@ -371,7 +375,39 @@ export default function App() {
   const dates        = useMemo(() => getVisibleDates(offset, layout.daysBack), [offset, layout.daysBack]);
   const isCurrentDay = offset === 0;
 
-  useEffect(() => { localStorage.setItem(STORAGE_KEY, JSON.stringify(habits)); }, [habits]);
+  // Persist locally + debounce cloud push
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(habits));
+
+    // Skip the very first render (initial load) to avoid overwriting remote
+    // with stale local data before we've had a chance to fetch remote.
+    if (isFirstLoad.current) return;
+
+    if (!isSyncConfigured()) return;
+    if (syncTimer.current) clearTimeout(syncTimer.current);
+    setSyncStatus('syncing');
+    syncTimer.current = setTimeout(() => {
+      pushRemote(habits)
+        .then(() => setSyncStatus('synced'))
+        .catch(() => setSyncStatus('error'));
+    }, 1500);
+  }, [habits]);
+
+  // On mount: pull from cloud and override local if remote has data
+  useEffect(() => {
+    if (!isSyncConfigured()) return;
+    setSyncStatus('syncing');
+    fetchRemote<Habit[]>()
+      .then(remote => {
+        if (remote && Array.isArray(remote) && remote.length > 0) {
+          setHabits(remote.map(h => ({ ...h, skips: h.skips ?? [] })));
+        }
+        setSyncStatus('synced');
+      })
+      .catch(() => setSyncStatus('error'))
+      .finally(() => { isFirstLoad.current = false; });
+  }, []);
+
   useEffect(() => { if (adding) addInputRef.current?.focus(); }, [adding]);
 
   const toggle = useCallback((id: string, ds: string) => {
@@ -492,6 +528,13 @@ export default function App() {
               e.target.value = '';
             }}
           />
+          {isSyncConfigured() && (
+            <span className={`sync-dot sync-${syncStatus}`} title={
+              syncStatus === 'syncing' ? 'Syncing…' :
+              syncStatus === 'synced'  ? 'Saved to cloud' :
+              syncStatus === 'error'   ? 'Sync failed' : ''
+            } />
+          )}
           <TrophyIcon />
           <span className="score">{totalScore}</span>
           {!isMobile && <span className="username">Kevin ▾</span>}

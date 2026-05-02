@@ -346,6 +346,24 @@ body {
   display: flex; gap: 6px; align-items: center;
 }
 
+/* ─── Sync status dot ────────────────────────────────────────────────────── */
+.sync-dot {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+  transition: background 0.3s;
+}
+.sync-idle    { background: #e2e8f0; }
+.sync-syncing { background: #fbbf24; animation: pulse 1s infinite; }
+.sync-synced  { background: #22c55e; }
+.sync-error   { background: #ef4444; }
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.4; }
+}
+
 /* ─── Data import / export buttons ───────────────────────────────────────── */
 .data-btn {
   background: none;
