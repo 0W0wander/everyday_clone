@@ -154,7 +154,7 @@ function generateDemo(): Habit[] {
 function loadHabits(): Habit[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) return (JSON.parse(raw) as Habit[]).map(h => ({ skips: [], ...h }));
+    if (raw) return (JSON.parse(raw) as Habit[]).map(h => ({ ...h, skips: h.skips ?? [] }));
   } catch { /* noop */ }
   return generateDemo();
 }
