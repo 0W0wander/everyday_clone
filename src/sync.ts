@@ -1,36 +1,55 @@
-// Cloud sync via JSONBin.io — free, no login required in the app.
-// Set VITE_JSONBIN_ID and VITE_JSONBIN_KEY in Vercel environment variables.
+// Cloud sync via JSONBin.io
+// VITE_JSONBIN_ID  — the bin ID from the URL (e.g. 6634abc12...)
+// VITE_JSONBIN_KEY — your master key (starts with $2a$10$...)
 
-const BIN_ID  = import.meta.env.VITE_JSONBIN_ID as string | undefined;
+const BIN_ID  = import.meta.env.VITE_JSONBIN_ID  as string | undefined;
 const API_KEY = import.meta.env.VITE_JSONBIN_KEY as string | undefined;
 const BASE    = 'https://api.jsonbin.io/v3/b';
 
 export function isSyncConfigured(): boolean {
-  return !!(BIN_ID && API_KEY);
+  return !!(BIN_ID?.trim() && API_KEY?.trim());
 }
 
 export async function fetchRemote<T>(): Promise<T | null> {
   if (!isSyncConfigured()) return null;
   try {
-    const res = await fetch(`${BASE}/${BIN_ID}/latest`, {
-      headers: { 'X-Master-Key': API_KEY! },
+    const res = await fetch(`${BASE}/${BIN_ID!.trim()}/latest`, {
+      headers: {
+        'X-Master-Key': API_KEY!.trim(),
+        'X-Bin-Meta':   'false',   // skip metadata wrapper, get record directly
+      },
     });
-    if (!res.ok) return null;
-    const json = await res.json();
-    return json.record as T;
-  } catch {
+    if (!res.ok) {
+      console.warn(`[sync] fetch failed: ${res.status}`);
+      return null;
+    }
+    // JSONBin with X-Bin-Meta: false returns the record directly
+    const data = await res.json();
+    // Tolerate both {record: [...]} shape and raw array
+    if (Array.isArray(data)) return data as T;
+    if (data && Array.isArray(data.record)) return data.record as T;
+    return null;               // bin contains something unexpected (e.g. 1) — ignore
+  } catch (err) {
+    console.warn('[sync] fetchRemote error', err);
     return null;
   }
 }
 
 export async function pushRemote<T>(data: T): Promise<void> {
   if (!isSyncConfigured()) return;
-  await fetch(`${BASE}/${BIN_ID}`, {
-    method: 'PUT',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Master-Key': API_KEY!,
-    },
-    body: JSON.stringify(data),
-  });
+  try {
+    const res = await fetch(`${BASE}/${BIN_ID!.trim()}`, {
+      method:  'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Master-Key': API_KEY!.trim(),
+      },
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      console.warn(`[sync] push failed: ${res.status}`);
+    }
+  } catch (err) {
+    console.warn('[sync] pushRemote error', err);
+  }
 }
