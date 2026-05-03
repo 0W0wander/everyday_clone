@@ -383,6 +383,8 @@ export default function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const syncTimer    = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isFirstLoad  = useRef(true);
+  // Always holds the latest habits so mount-effect closures can read current value
+  const habitsRef    = useRef<Habit[]>(habits);
 
   const vw     = useViewportWidth();
   const layout = useMemo(() => getLayout(vw), [vw]);
@@ -408,14 +410,24 @@ export default function App() {
     }, 1500);
   }, [habits]);
 
-  // On mount: pull from cloud and override local if remote has data
+  // Keep ref in sync so mount effect can read latest habits without stale closure
+  useEffect(() => { habitsRef.current = habits; }, [habits]);
+
+  // On mount: pull from cloud and override local if remote has data.
+  // If the bin contains unexpected/invalid data (e.g. 1), automatically
+  // push the current local habits to initialise it — no manual fix needed.
   useEffect(() => {
     if (!isSyncConfigured()) return;
     setSyncStatus('syncing');
     fetchRemote<unknown>()
       .then(remote => {
         const clean = sanitizeAll(remote);
-        if (clean.length > 0) setHabits(clean);
+        if (clean.length > 0) {
+          setHabits(clean);
+        } else if (remote !== null) {
+          // Bin exists but has bad/empty content — push local data to fix it
+          pushRemote(habitsRef.current).catch(() => {/* best-effort */});
+        }
         setSyncStatus('synced');
       })
       .catch(() => setSyncStatus('error'))

@@ -28,7 +28,9 @@ export async function fetchRemote<T>(): Promise<T | null> {
     // Tolerate both {record: [...]} shape and raw array
     if (Array.isArray(data)) return data as T;
     if (data && Array.isArray(data.record)) return data.record as T;
-    return null;               // bin contains something unexpected (e.g. 1) — ignore
+    // Bin has unexpected content (e.g. integer 1) — return it as-is so the
+    // caller can detect "bin exists but needs initialising" vs a real failure.
+    return data as T;
   } catch (err) {
     console.warn('[sync] fetchRemote error', err);
     return null;
