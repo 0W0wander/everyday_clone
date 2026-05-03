@@ -148,18 +148,33 @@ function cellBg(streak: number, color: HabitColor): string {
   return streak === 0 ? '' : COLOR_PALETTES[color][intensityIdx(streak)];
 }
 
-// ─── Demo data ────────────────────────────────────────────────────────────────
+// ─── Data sanitisation ────────────────────────────────────────────────────────
+// Applied to every habit that enters the app — from localStorage, JSONBin,
+// or file import — so we never crash on missing / wrong-typed fields.
 
-function generateDemo(): Habit[] {
-  return []; // start fresh — no sample data
+function sanitize(h: Partial<Habit>): Habit {
+  return {
+    id:          typeof h.id   === 'string' ? h.id   : `h-${Date.now()}-${Math.random()}`,
+    name:        typeof h.name === 'string' ? h.name : 'New Habit',
+    color:       (['green','blue','yellow','orange','red','purple','teal'] as HabitColor[])
+                   .includes(h.color as HabitColor) ? h.color as HabitColor : 'green',
+    completions: Array.isArray(h.completions) ? h.completions.filter(d => typeof d === 'string') : [],
+    skips:       Array.isArray(h.skips)       ? h.skips.filter(d => typeof d === 'string')       : [],
+    isBreak:     !!h.isBreak,
+  };
+}
+
+function sanitizeAll(raw: unknown): Habit[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map(h => sanitize(h as Partial<Habit>));
 }
 
 function loadHabits(): Habit[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) return (JSON.parse(raw) as Habit[]).map(h => ({ ...h, skips: h.skips ?? [] }));
+    if (raw) return sanitizeAll(JSON.parse(raw));
   } catch { /* noop */ }
-  return generateDemo();
+  return [];
 }
 
 // ─── EditPanel — rendered via portal so it's never clipped ───────────────────
@@ -397,11 +412,10 @@ export default function App() {
   useEffect(() => {
     if (!isSyncConfigured()) return;
     setSyncStatus('syncing');
-    fetchRemote<Habit[]>()
+    fetchRemote<unknown>()
       .then(remote => {
-        if (remote && Array.isArray(remote) && remote.length > 0) {
-          setHabits(remote.map(h => ({ ...h, skips: h.skips ?? [] })));
-        }
+        const clean = sanitizeAll(remote);
+        if (clean.length > 0) setHabits(clean);
         setSyncStatus('synced');
       })
       .catch(() => setSyncStatus('error'))
@@ -484,10 +498,11 @@ export default function App() {
     const reader = new FileReader();
     reader.onload = e => {
       try {
-        const parsed = JSON.parse(e.target?.result as string) as Habit[];
-        if (!Array.isArray(parsed)) throw new Error('Invalid format');
-        const ok = window.confirm(`Replace your current data with ${parsed.length} habits from this file?`);
-        if (ok) setHabits(parsed.map(h => ({ ...h, skips: h.skips ?? [] })));
+        const parsed = JSON.parse(e.target?.result as string);
+        const clean  = sanitizeAll(parsed);
+        if (clean.length === 0) throw new Error('No valid habits found in this file.');
+        const ok = window.confirm(`Replace your current data with ${clean.length} habits from this file?`);
+        if (ok) setHabits(clean);
       } catch {
         alert('Could not read this file. Make sure it\'s a valid Everyday export.');
       }
