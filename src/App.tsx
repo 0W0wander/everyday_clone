@@ -52,16 +52,54 @@ function getLayout(width: number): Layout {
 
 // ─── Analytics helpers ────────────────────────────────────────────────────────
 
-function countInDays(completions: string[], days: number): number {
-  const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - days);
-  cutoff.setHours(12, 0, 0, 0);
-  const cutStr = fmt(cutoff);
-  return completions.filter(d => d >= cutStr).length;
+// ── Calendar period helpers ───────────────────────────────────────────────────
+// Returns YYYY-MM-DD of the Monday of the current week
+function startOfWeek(): string {
+  const d = new Date(); d.setHours(12, 0, 0, 0);
+  const dow = d.getDay(); // 0=Sun … 6=Sat
+  d.setDate(d.getDate() - (dow === 0 ? 6 : dow - 1));
+  return fmt(d);
+}
+// Returns YYYY-MM-DD of the 1st of the current month
+function startOfMonth(): string {
+  const d = new Date(); d.setHours(12, 0, 0, 0); d.setDate(1);
+  return fmt(d);
 }
 
-function rateInDays(completions: string[], days: number): number {
-  return Math.round((countInDays(completions, days) / days) * 100);
+// Count completions from fromDate (inclusive) to today
+function countFrom(completions: string[], fromDate: string): number {
+  return completions.filter(d => d >= fromDate).length;
+}
+
+// Completion rate from fromDate to today, using an adjusted denominator:
+// denominator = days elapsed from max(fromDate, habit's first completion) to today
+// This avoids penalising habits that started mid-period.
+function rateFrom(completions: string[], fromDate: string): number {
+  if (!completions.length) return 0;
+  const todStr = fmt(todayNoon());
+  const firstEntry = [...completions].sort()[0];
+  const effectiveFrom = firstEntry > fromDate ? firstEntry : fromDate;
+  const days = Math.max(1,
+    Math.round(
+      (new Date(todStr + 'T12:00:00').getTime() -
+       new Date(effectiveFrom + 'T12:00:00').getTime()) / 86400000
+    ) + 1
+  );
+  return Math.round((countFrom(completions, fromDate) / days) * 100);
+}
+
+// All-time rate: completions / days since first completion
+function allTimeRate(completions: string[]): number {
+  if (!completions.length) return 0;
+  const todStr = fmt(todayNoon());
+  const first = [...completions].sort()[0];
+  const days = Math.max(1,
+    Math.round(
+      (new Date(todStr + 'T12:00:00').getTime() -
+       new Date(first + 'T12:00:00').getTime()) / 86400000
+    ) + 1
+  );
+  return Math.round((completions.length / days) * 100);
 }
 
 function rateColor(rate: number, accent: string): string {
@@ -72,8 +110,8 @@ function rateColor(rate: number, accent: string): string {
 
 const STAT_HEADERS: [string, string, string][] = [
   ['current\nstreak', 'longest\nstreak', 'total\ncount'],
-  ['week\ncount',     'month\ncount',    'year\ncount'],
-  ['week\ncompl.\nrate', 'month\ncompl.\nrate', 'year\ncompl.\nrate'],
+  ['this\nweek',      'this\nmonth',     'all\ntime'],
+  ['week\n%',         'month\n%',        'all-time\n%'],
 ];
 
 // ─── Date helpers ─────────────────────────────────────────────────────────────
@@ -321,14 +359,14 @@ const HabitRow = memo(function HabitRow(
   const best = cur > 0 && cur >= lon;
   const acc  = COLOR_ACCENT[habit.color];
 
-  // Analytics view 1 — counts
-  const wkCnt = useMemo(() => countInDays(habit.completions, 7),   [habit.completions]);
-  const moCnt = useMemo(() => countInDays(habit.completions, 30),  [habit.completions]);
-  const yrCnt = useMemo(() => countInDays(habit.completions, 365), [habit.completions]);
-  // Analytics view 2 — completion rates
-  const wkRate = useMemo(() => rateInDays(habit.completions, 7),   [habit.completions]);
-  const moRate = useMemo(() => rateInDays(habit.completions, 30),  [habit.completions]);
-  const yrRate = useMemo(() => rateInDays(habit.completions, 365), [habit.completions]);
+  // Analytics view 1 — calendar-period counts
+  const wkCnt  = useMemo(() => countFrom(habit.completions, startOfWeek()),  [habit.completions]);
+  const moCnt  = useMemo(() => countFrom(habit.completions, startOfMonth()), [habit.completions]);
+  const allCnt = useMemo(() => habit.completions.length,                     [habit.completions]);
+  // Analytics view 2 — completion rates (denominator = days since habit started)
+  const wkRate  = useMemo(() => rateFrom(habit.completions, startOfWeek()),  [habit.completions]);
+  const moRate  = useMemo(() => rateFrom(habit.completions, startOfMonth()), [habit.completions]);
+  const allRate = useMemo(() => allTimeRate(habit.completions),               [habit.completions]);
 
   return (
     <>
@@ -398,7 +436,7 @@ const HabitRow = memo(function HabitRow(
       {analyticsView === 1 && <>
         <div className="cell stat-cell"><span className="stat-num">{wkCnt}</span></div>
         <div className="cell stat-cell"><span className="stat-num">{moCnt}</span></div>
-        <div className="cell stat-cell"><span className="stat-num">{yrCnt}</span></div>
+        <div className="cell stat-cell"><span className="stat-num">{allCnt}</span></div>
       </>}
 
       {analyticsView === 2 && <>
@@ -409,7 +447,7 @@ const HabitRow = memo(function HabitRow(
           <span className="stat-rate" style={{ color: rateColor(moRate, acc) }}>{moRate}%</span>
         </div>
         <div className="cell stat-cell">
-          <span className="stat-rate" style={{ color: rateColor(yrRate, acc) }}>{yrRate}%</span>
+          <span className="stat-rate" style={{ color: rateColor(allRate, acc) }}>{allRate}%</span>
         </div>
       </>}
     </>
