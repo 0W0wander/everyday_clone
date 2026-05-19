@@ -185,6 +185,29 @@ body {
   clip-path: polygon(100% 0, 100% 100%, 0 100%);
 }
 
+/* Failed day — red tint background + ✕ drawn with two pseudo-lines */
+.habit-cell.failed-cell {
+  background-color: #fee2e2;
+}
+.cell-fail {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.cell-fail::before,
+.cell-fail::after {
+  content: '';
+  position: absolute;
+  width: 40%;
+  height: 2px;
+  background: #ef4444;
+  border-radius: 1px;
+}
+.cell-fail::before { transform: rotate(45deg); }
+.cell-fail::after  { transform: rotate(-45deg); }
+
 /* Today column: subtle tint only, no side borders */
 .habit-cell.today-col {
   background: #f6fef9;

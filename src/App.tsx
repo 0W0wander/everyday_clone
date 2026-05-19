@@ -160,6 +160,7 @@ function sanitize(h: Partial<Habit>): Habit {
                    .includes(h.color as HabitColor) ? h.color as HabitColor : 'green',
     completions: Array.isArray(h.completions) ? h.completions.filter(d => typeof d === 'string') : [],
     skips:       Array.isArray(h.skips)       ? h.skips.filter(d => typeof d === 'string')       : [],
+    fails:       Array.isArray(h.fails)       ? h.fails.filter(d => typeof d === 'string')       : [],
     isBreak:     !!h.isBreak,
   };
 }
@@ -278,6 +279,7 @@ const HabitRow = memo(function HabitRow(
   const nameRef = useRef<HTMLDivElement>(null);
   const comp = useMemo(() => new Set(habit.completions), [habit.completions]);
   const skip = useMemo(() => new Set(habit.skips),       [habit.skips]);
+  const fail = useMemo(() => new Set(habit.fails),       [habit.fails]);
   const cur  = useMemo(() => calcCurrentStreak(habit.completions, habit.skips),  [habit.completions, habit.skips]);
   const lon  = useMemo(() => calcLongestStreak(habit.completions, habit.skips),  [habit.completions, habit.skips]);
   const best = cur > 0 && cur >= lon;
@@ -314,6 +316,7 @@ const HabitRow = memo(function HabitRow(
         const ds    = fmt(d);
         const done  = comp.has(ds);
         const skpd  = skip.has(ds);
+        const faild = fail.has(ds);
         const str   = (done || skpd) ? streakAt(comp, skip, ds) : 0;
         const bg    = cellBg(str, habit.color);
         const isTd  = isCurrentDay && i === dates.length - 1;
@@ -321,12 +324,13 @@ const HabitRow = memo(function HabitRow(
         return (
           <div
             key={`${habit.id}-${i}`}
-            className={`cell habit-cell${isTd ? ' today-col' : ''}`}
+            className={`cell habit-cell${isTd ? ' today-col' : ''}${faild ? ' failed-cell' : ''}`}
             style={done ? { backgroundColor: bg } : undefined}
             onClick={() => onToggle(habit.id, ds)}
-            title={`${habit.name} — ${ds}${skpd ? ' (skipped)' : ''}`}
+            title={`${habit.name} — ${ds}${skpd ? ' (skipped)' : faild ? ' (failed)' : ''}`}
           >
-            {skpd && <div className="cell-skip" style={{ background: bg }} />}
+            {skpd  && <div className="cell-skip" style={{ background: bg }} />}
+            {faild && <div className="cell-fail" />}
           </div>
         );
       })}
@@ -436,21 +440,31 @@ export default function App() {
 
   useEffect(() => { if (adding) addInputRef.current?.focus(); }, [adding]);
 
+  // Cycle: empty → done → skip → fail → empty
   const toggle = useCallback((id: string, ds: string) => {
     setHabits(prev => prev.map(h => {
       if (h.id !== id) return h;
-      if (!h.completions.includes(ds) && !h.skips.includes(ds))
+      const done = h.completions.includes(ds);
+      const skpd = h.skips.includes(ds);
+      const fail = h.fails.includes(ds);
+      if (!done && !skpd && !fail)
+        // empty → done
         return { ...h, completions: [...h.completions, ds] };
-      if (h.completions.includes(ds))
+      if (done)
+        // done → skip
         return { ...h, completions: h.completions.filter(c => c !== ds), skips: [...h.skips, ds] };
-      return { ...h, skips: h.skips.filter(s => s !== ds) };
+      if (skpd)
+        // skip → fail
+        return { ...h, skips: h.skips.filter(s => s !== ds), fails: [...h.fails, ds] };
+      // fail → empty
+      return { ...h, fails: h.fails.filter(f => f !== ds) };
     }));
   }, []);
 
   const addHabit = useCallback(() => {
     const name = newName.trim();
     if (!name) return;
-    setHabits(prev => [...prev, { id: `h-${Date.now()}`, name, color: newColor, completions: [], skips: [] }]);
+    setHabits(prev => [...prev, { id: `h-${Date.now()}`, name, color: newColor, completions: [], skips: [], fails: [] }]);
     setNewName(''); setNewColor('green'); setAdding(false);
   }, [newName, newColor]);
 
