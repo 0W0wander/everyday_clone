@@ -185,9 +185,10 @@ body {
   clip-path: polygon(100% 0, 100% 100%, 0 100%);
 }
 
-/* Failed day — red tint background + ✕ drawn with two pseudo-lines */
+/* Failed day — light habit-color tint + ✕ in the habit's accent color */
 .habit-cell.failed-cell {
-  background-color: #fee2e2;
+  background-color: #f8f8f8; /* fallback */
+  background-color: color-mix(in srgb, var(--fail-color, #aaa) 12%, white);
 }
 .cell-fail {
   position: absolute;
@@ -202,8 +203,9 @@ body {
   position: absolute;
   width: 40%;
   height: 2px;
-  background: #ef4444;
+  background: var(--fail-color, #aaa);
   border-radius: 1px;
+  opacity: 0.85;
 }
 .cell-fail::before { transform: rotate(45deg); }
 .cell-fail::after  { transform: rotate(-45deg); }

@@ -8,19 +8,20 @@ import { fetchRemote, pushRemote, isSyncConfigured } from './sync';
 
 // ─── Palettes ────────────────────────────────────────────────────────────────
 
+// Palettes go light → vivid (peak streak = brightest, not darkest)
 const COLOR_PALETTES: Record<HabitColor, string[]> = {
-  green:  ['#d1fae5','#a7f3d0','#6ee7b7','#34d399','#10b981','#059669','#047857','#064e3b'],
-  blue:   ['#dbeafe','#bfdbfe','#93c5fd','#60a5fa','#3b82f6','#2563eb','#1d4ed8','#1e3a8a'],
-  yellow: ['#fef9c3','#fef08a','#fde047','#facc15','#eab308','#ca8a04','#a16207','#713f12'],
-  orange: ['#ffedd5','#fed7aa','#fdba74','#fb923c','#f97316','#ea580c','#c2410c','#7c2d12'],
-  red:    ['#fee2e2','#fecaca','#fca5a5','#f87171','#ef4444','#dc2626','#b91c1c','#7f1d1d'],
-  purple: ['#f3e8ff','#e9d5ff','#d8b4fe','#c084fc','#a855f7','#9333ea','#7e22ce','#4a1d96'],
-  teal:   ['#ccfbf1','#99f6e4','#5eead4','#2dd4bf','#14b8a6','#0d9488','#0f766e','#134e4a'],
+  green:  ['#f0fdf4','#dcfce7','#bbf7d0','#86efac','#4ade80','#22c55e','#00c853','#00e676'],
+  blue:   ['#eff6ff','#dbeafe','#bfdbfe','#93c5fd','#60a5fa','#3b82f6','#2979ff','#82b1ff'],
+  yellow: ['#fefce8','#fef9c3','#fef08a','#fde047','#facc15','#fbbf24','#ffd740','#ffe57f'],
+  orange: ['#fff7ed','#ffedd5','#fed7aa','#fdba74','#fb923c','#f97316','#ff6d00','#ff9100'],
+  red:    ['#fff1f2','#ffe4e6','#fecdd3','#fda4af','#fb7185','#f43f5e','#ff1744','#ff5252'],
+  purple: ['#fdf4ff','#fae8ff','#f0abfc','#e879f9','#d946ef','#c026d3','#aa00ff','#ea80fc'],
+  teal:   ['#f0fdfa','#ccfbf1','#99f6e4','#5eead4','#2dd4bf','#14b8a6','#00bcd4','#1de9b6'],
 };
 
 const COLOR_ACCENT: Record<HabitColor, string> = {
-  green:  '#16a34a', blue:   '#2563eb', yellow: '#ca8a04',
-  orange: '#ea580c', red:    '#dc2626', purple: '#9333ea', teal:   '#0d9488',
+  green:  '#00c853', blue:   '#2979ff', yellow: '#ffd740',
+  orange: '#ff6d00', red:    '#ff1744', purple: '#aa00ff', teal:   '#00bcd4',
 };
 
 const MONTHS      = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
@@ -325,7 +326,7 @@ const HabitRow = memo(function HabitRow(
           <div
             key={`${habit.id}-${i}`}
             className={`cell habit-cell${isTd ? ' today-col' : ''}${faild ? ' failed-cell' : ''}`}
-            style={done ? { backgroundColor: bg } : undefined}
+            style={done ? { backgroundColor: bg } : faild ? { '--fail-color': acc } as React.CSSProperties : undefined}
             onClick={() => onToggle(habit.id, ds)}
             title={`${habit.name} — ${ds}${skpd ? ' (skipped)' : faild ? ' (failed)' : ''}`}
           >
