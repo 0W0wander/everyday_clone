@@ -108,11 +108,17 @@ function useViewportWidth(): number {
 function streakAt(comp: Set<string>, skip: Set<string>, ds: string): number {
   if (!comp.has(ds) && !skip.has(ds)) return 0;
   let n = 1;
+  let consecSkips = skip.has(ds) ? 1 : 0;
   const d = new Date(ds + 'T12:00:00');
   for (;;) {
     d.setDate(d.getDate() - 1);
     const s = fmt(d);
-    if (comp.has(s) || skip.has(s)) n++; else break;
+    if (comp.has(s)) { n++; consecSkips = 0; }
+    else if (skip.has(s)) {
+      consecSkips++;
+      if (consecSkips > 2) break; // 3+ consecutive skips breaks the streak
+      n++;
+    } else break;
   }
   return n;
 }
@@ -127,17 +133,46 @@ function calcCurrentStreak(completions: string[], skips: string[]): number {
 }
 
 function calcLongestStreak(completions: string[], skips: string[]): number {
+  const skipSet = new Set(skips);
   const all = [...new Set([...completions, ...skips])].sort();
   if (!all.length) return 0;
-  let max = 1, cur = 1;
+  let max = 0, cur = skipSet.has(all[0]) ? 0 : 1;
+  let consecSkips = skipSet.has(all[0]) ? 1 : 0;
   for (let i = 1; i < all.length; i++) {
     const diff = Math.round(
       (new Date(all[i] + 'T12:00:00').getTime() -
        new Date(all[i-1] + 'T12:00:00').getTime()) / 86400000
     );
-    if (diff === 1) { cur++; max = Math.max(max, cur); } else cur = 1;
+    if (diff !== 1) {
+      max = Math.max(max, cur);
+      cur = skipSet.has(all[i]) ? 0 : 1;
+      consecSkips = skipSet.has(all[i]) ? 1 : 0;
+    } else if (!skipSet.has(all[i])) {
+      consecSkips = 0;
+      cur++;
+    } else {
+      consecSkips++;
+      if (consecSkips > 2) { max = Math.max(max, cur); cur = 0; }
+      else cur++;
+    }
   }
-  return max;
+  return Math.max(max, cur);
+}
+
+// Returns true if adding `ds` to the skip set would create a run longer than maxRun
+function wouldExceedSkipRun(skips: string[], ds: string, maxRun: number): boolean {
+  const skipSet = new Set(skips);
+  const base = new Date(ds + 'T12:00:00');
+  let run = 1;
+  for (let i = 1; i <= maxRun; i++) {
+    const d = new Date(base); d.setDate(d.getDate() - i);
+    if (skipSet.has(fmt(d))) run++; else break;
+  }
+  for (let i = 1; i <= maxRun; i++) {
+    const d = new Date(base); d.setDate(d.getDate() + i);
+    if (skipSet.has(fmt(d))) run++; else break;
+  }
+  return run > maxRun;
 }
 
 function intensityIdx(s: number): number {
@@ -322,6 +357,15 @@ const HabitRow = memo(function HabitRow(
         const bg    = cellBg(str, habit.color);
         const isTd  = isCurrentDay && i === dates.length - 1;
 
+        // Determine lean direction for skip triangles
+        const prevDs = i > 0 ? fmt(dates[i - 1]) : null;
+        const nextDs = i < dates.length - 1 ? fmt(dates[i + 1]) : null;
+        const leftActive  = skpd && prevDs != null && (comp.has(prevDs) || skip.has(prevDs));
+        const rightActive = skpd && nextDs != null && (comp.has(nextDs) || skip.has(nextDs));
+        // Show left arrow if left is active; show right arrow if right is active (or neither → default right)
+        const showLeft  = skpd && leftActive;
+        const showRight = skpd && (rightActive || !leftActive);
+
         return (
           <div
             key={`${habit.id}-${i}`}
@@ -330,7 +374,8 @@ const HabitRow = memo(function HabitRow(
             onClick={() => onToggle(habit.id, ds)}
             title={`${habit.name} — ${ds}${skpd ? ' (skipped)' : faild ? ' (failed)' : ''}`}
           >
-            {skpd  && <div className="cell-skip" style={{ background: bg }} />}
+            {showLeft  && <div className="cell-skip cell-skip-left"  style={{ background: bg }} />}
+            {showRight && <div className="cell-skip cell-skip-right" style={{ background: bg }} />}
             {faild && <div className="cell-fail" />}
           </div>
         );
@@ -451,9 +496,12 @@ export default function App() {
       if (!done && !skpd && !fail)
         // empty → done
         return { ...h, completions: [...h.completions, ds] };
-      if (done)
-        // done → skip
+      if (done) {
+        // done → skip (unless that would create 3+ consecutive skips → go to fail instead)
+        if (wouldExceedSkipRun(h.skips, ds, 2))
+          return { ...h, completions: h.completions.filter(c => c !== ds), fails: [...h.fails, ds] };
         return { ...h, completions: h.completions.filter(c => c !== ds), skips: [...h.skips, ds] };
+      }
       if (skpd)
         // skip → fail
         return { ...h, skips: h.skips.filter(s => s !== ds), fails: [...h.fails, ds] };

@@ -182,8 +182,11 @@ body {
 .cell-skip {
   position: absolute;
   inset: 0;
-  clip-path: polygon(100% 0, 100% 100%, 0 100%);
 }
+/* Arrow with base on LEFT edge → leans toward left neighbor "▶" */
+.cell-skip-left  { clip-path: polygon(0 0, 0 100%, 100% 50%); }
+/* Arrow with base on RIGHT edge → leans toward right neighbor "◀" */
+.cell-skip-right { clip-path: polygon(100% 0, 100% 100%, 0 50%); }
 
 /* Failed day — light habit-color tint + ✕ in the habit's accent color */
 .habit-cell.failed-cell {
