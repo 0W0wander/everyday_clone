@@ -145,7 +145,8 @@ function useViewportWidth(): number {
 
 function streakAt(comp: Set<string>, skip: Set<string>, ds: string): number {
   if (!comp.has(ds) && !skip.has(ds)) return 0;
-  let n = 1;
+  // Skips are transparent: they keep the streak alive but don't add to the count
+  let n = comp.has(ds) ? 1 : 0;
   let consecSkips = skip.has(ds) ? 1 : 0;
   const d = new Date(ds + 'T12:00:00');
   for (;;) {
@@ -154,8 +155,8 @@ function streakAt(comp: Set<string>, skip: Set<string>, ds: string): number {
     if (comp.has(s)) { n++; consecSkips = 0; }
     else if (skip.has(s)) {
       consecSkips++;
-      if (consecSkips > 2) break; // 3+ consecutive skips breaks the streak
-      n++;
+      if (consecSkips > 2) break;
+      // don't increment n — skip is transparent
     } else break;
   }
   return n;
@@ -191,7 +192,7 @@ function calcLongestStreak(completions: string[], skips: string[]): number {
     } else {
       consecSkips++;
       if (consecSkips > 2) { max = Math.max(max, cur); cur = 0; }
-      else cur++;
+      // skip is transparent — don't increment cur
     }
   }
   return Math.max(max, cur);
