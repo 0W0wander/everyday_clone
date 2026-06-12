@@ -1,10 +1,11 @@
 import {
-  useState, useEffect, useCallback, useMemo, useRef, memo,
+  useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, memo,
 } from 'react';
 import { createPortal } from 'react-dom';
 import './App.css';
 import type { Habit, HabitColor } from './types';
 import { fetchRemote, pushRemote, isSyncConfigured } from './sync';
+import { getQuote } from './quotes';
 
 // ─── Color utilities ──────────────────────────────────────────────────────────
 
@@ -14,6 +15,8 @@ const LEGACY_COLOR_HEX: Record<string, string> = {
   orange: '#fb923c', red:    '#fb7185', purple: '#d946ef', teal:   '#2dd4bf',
 };
 const DEFAULT_COLOR = '#4ade80';
+const DEFAULT_PRICE       = 0.1;  // $ per normal completion
+const DEFAULT_BONUS_PRICE = 1;    // $ per middle-click "bonus" completion
 
 // #rrggbb (or #rgb) → [H 0-360, S 0-100, L 0-100]
 function hexToHsl(hex: string): [number, number, number] {
@@ -76,6 +79,15 @@ function getAccent(hex: string): string {
 const MONTHS      = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 const DAYS        = ['SUN','MON','TUE','WED','THU','FRI','SAT'];
 const STORAGE_KEY = 'everyday-habits-v2';
+const SPENT_KEY   = 'everyday-spent-v1';
+
+function loadSpent(): number {
+  try {
+    const raw = localStorage.getItem(SPENT_KEY);
+    const n = raw ? parseFloat(raw) : 0;
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  } catch { return 0; }
+}
 
 // ─── Responsive layout ────────────────────────────────────────────────────────
 
@@ -149,8 +161,8 @@ function rateColor(rate: number, accent: string): string {
   return '#ef4444';
 }
 
-const STAT_HEADERS: [string, string, string][] = [
-  ['current\nstreak', 'longest\nstreak', 'total\ncount'],
+const STAT_HEADERS: string[][] = [
+  ['current\nstreak', 'longest\nstreak'],
   ['this\nweek',      'this\nmonth',     'all\ntime'],
   ['week\n%',         'month\n%',        'all-time\n%'],
 ];
@@ -236,6 +248,22 @@ function calcLongestStreak(completions: string[], skips: string[]): number {
   return Math.max(max, cur);
 }
 
+// Consecutive days (ending today, or yesterday if today isn't finished yet)
+// on which EVERY active habit was completed. This is the "perfect day" streak.
+function calcDayStreak(habits: Habit[]): number {
+  if (habits.length === 0) return 0;
+  const sets = habits.map(h => new Set(h.completions));
+  const perfect = (ds: string) => sets.every(s => s.has(ds));
+  const d = todayNoon();
+  if (!perfect(fmt(d))) d.setDate(d.getDate() - 1); // grace: today still in progress
+  let streak = 0;
+  while (perfect(fmt(d))) {
+    streak++;
+    d.setDate(d.getDate() - 1);
+  }
+  return streak;
+}
+
 function wouldExceedSkipRun(skips: string[], ds: string, maxRun: number): boolean {
   const skipSet = new Set(skips);
   const base = new Date(ds + 'T12:00:00');
@@ -278,6 +306,9 @@ function sanitize(h: Partial<Habit>): Habit {
     completions: Array.isArray(h.completions) ? h.completions.filter(d => typeof d === 'string') : [],
     skips:       Array.isArray(h.skips)       ? h.skips.filter(d => typeof d === 'string')       : [],
     fails:       Array.isArray(h.fails)       ? h.fails.filter(d => typeof d === 'string')       : [],
+    bonuses:     Array.isArray(h.bonuses)     ? h.bonuses.filter(d => typeof d === 'string')     : [],
+    price:       (typeof h.price === 'number'      && isFinite(h.price)      && h.price      >= 0) ? h.price      : undefined,
+    bonusPrice:  (typeof h.bonusPrice === 'number' && isFinite(h.bonusPrice) && h.bonusPrice >= 0) ? h.bonusPrice : undefined,
     isBreak:  !!h.isBreak,
     archived: !!h.archived,
     comments: (h.comments && typeof h.comments === 'object' && !Array.isArray(h.comments))
@@ -436,26 +467,63 @@ function CommentPopover({ habitName, ds, existing, anchorRect, onSave, onClose }
   );
 }
 
+// Anchors a portal popover to a live element rect, clamped inside the viewport.
+// Recomputes on every render + on scroll/resize, so it stays glued even when
+// rows reorder. Returns null until the panel has been measured once.
+function useAnchoredPosition(
+  getAnchor: () => DOMRect | null,
+  panelRef: React.RefObject<HTMLDivElement | null>,
+  preferAbove = false,
+) {
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const on = () => setTick(t => t + 1);
+    window.addEventListener('scroll', on, true);
+    window.addEventListener('resize', on);
+    return () => { window.removeEventListener('scroll', on, true); window.removeEventListener('resize', on); };
+  }, []);
+  useLayoutEffect(() => {
+    const r = getAnchor();
+    const panel = panelRef.current;
+    if (!r || !panel) return;
+    const pw = panel.offsetWidth || 280;
+    const ph = panel.offsetHeight || 0;
+    const m = 12;
+    let left = Math.min(r.left + window.scrollX, window.innerWidth - pw - m);
+    left = Math.max(m, left);
+    const below = r.bottom + window.scrollY + 6;
+    const above = r.top + window.scrollY - ph - 6;
+    const fitsBelow = below + ph <= window.scrollY + window.innerHeight - 8;
+    const fitsAbove = above >= window.scrollY + 8;
+    const fallback = Math.max(window.scrollY + 8, window.scrollY + window.innerHeight - ph - 8);
+    const top = preferAbove
+      ? (fitsAbove ? above : fitsBelow ? below : fallback)
+      : (fitsBelow ? below : fitsAbove ? above : fallback);
+    setPos(p => (p && Math.abs(p.top - top) < 0.5 && Math.abs(p.left - left) < 0.5) ? p : { top, left });
+    // Intentionally runs after every render (no deps) so the popover stays glued
+    // to its anchor even when rows reorder; setPos is guarded to avoid loops.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  });
+  return pos;
+}
+
 // ─── EditPanel — rendered via portal so it's never clipped ───────────────────
 
 interface EditPanelProps {
   habit: Habit;
-  anchorRect: DOMRect;
-  isFirst: boolean;
-  isLast: boolean;
-  onSave:     (name: string, color: HabitColor) => void;
+  onSave:     (name: string, color: HabitColor, price: number, bonusPrice: number) => void;
   onCancel:   () => void;
   onDelete:   () => void;
   onArchive:  () => void;
-  onMoveUp:   () => void;
-  onMoveDown: () => void;
 }
 
-function EditPanel({ habit, anchorRect, isFirst, isLast,
-  onSave, onCancel, onDelete, onArchive, onMoveUp, onMoveDown }: EditPanelProps) {
+function EditPanel({ habit, onSave, onCancel, onDelete, onArchive }: EditPanelProps) {
 
   const [name,  setName]  = useState(habit.name);
   const [color, setColor] = useState<string>(habit.color);
+  const [price,      setPrice]      = useState<string>(String(habit.price      ?? DEFAULT_PRICE));
+  const [bonusPrice, setBonusPrice] = useState<string>(String(habit.bonusPrice ?? DEFAULT_BONUS_PRICE));
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => { inputRef.current?.focus(); }, []);
@@ -471,13 +539,34 @@ function EditPanel({ habit, anchorRect, isFirst, isLast,
     return () => { clearTimeout(id); document.removeEventListener('mousedown', handler); };
   }, [onCancel]);
 
-  const top  = anchorRect.bottom + window.scrollY + 4;
-  const left = anchorRect.left   + window.scrollX;
+  // Stay glued to this habit's row, even after reordering, and clamp to viewport.
+  const pos = useAnchoredPosition(
+    () => {
+      const el = document.querySelector(`[data-hid="${CSS.escape(habit.id)}"]`);
+      return el ? (el as HTMLElement).getBoundingClientRect() : null;
+    },
+    panelRef,
+  );
 
-  const handleSave = () => { const n = name.trim(); if (n) onSave(n, color); };
+  const handleSave = () => {
+    const n = name.trim();
+    if (!n) return;
+    const p  = parseFloat(price);
+    const bp = parseFloat(bonusPrice);
+    onSave(
+      n,
+      color,
+      Number.isFinite(p)  && p  >= 0 ? p  : DEFAULT_PRICE,
+      Number.isFinite(bp) && bp >= 0 ? bp : DEFAULT_BONUS_PRICE,
+    );
+  };
 
   return createPortal(
-    <div ref={panelRef} className="edit-panel" style={{ top, left }}>
+    <div
+      ref={panelRef}
+      className="edit-panel"
+      style={{ top: pos?.top ?? 0, left: pos?.left ?? 0, visibility: pos ? 'visible' : 'hidden' }}
+    >
       <input
         ref={inputRef}
         className="edit-panel-input"
@@ -503,13 +592,31 @@ function EditPanel({ habit, anchorRect, isFirst, isLast,
           ))}
         </div>
       </div>
-      <div className="edit-panel-move">
-        <button className="move-btn" disabled={isFirst} onClick={onMoveUp} title="Move up">
-          <ArrowUpIcon /> Move up
-        </button>
-        <button className="move-btn" disabled={isLast} onClick={onMoveDown} title="Move down">
-          <ArrowDownIcon /> Move down
-        </button>
+      <div className="price-row">
+        <label className="price-field">
+          <span className="price-label">Per completion</span>
+          <span className="price-input-wrap">
+            <span className="price-prefix">$</span>
+            <input
+              type="number" min="0" step="0.05" inputMode="decimal"
+              value={price}
+              onChange={e => setPrice(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') handleSave(); if (e.key === 'Escape') onCancel(); }}
+            />
+          </span>
+        </label>
+        <label className="price-field">
+          <span className="price-label">Middle-click bonus</span>
+          <span className="price-input-wrap">
+            <span className="price-prefix">$</span>
+            <input
+              type="number" min="0" step="0.25" inputMode="decimal"
+              value={bonusPrice}
+              onChange={e => setBonusPrice(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') handleSave(); if (e.key === 'Escape') onCancel(); }}
+            />
+          </span>
+        </label>
       </div>
       <div className="edit-panel-actions">
         <button className="btn-save" onClick={handleSave}>Save</button>
@@ -526,6 +633,67 @@ function EditPanel({ habit, anchorRect, isFirst, isLast,
   );
 }
 
+// ─── AddPanel — new-habit popover (portal, never clipped) ────────────────────
+
+function AddPanel({ anchorRef, onAdd, onClose }: {
+  anchorRef: React.RefObject<HTMLButtonElement | null>;
+  onAdd: (name: string, color: string) => void;
+  onClose: () => void;
+}) {
+  const [name,  setName]  = useState('');
+  const [color, setColor] = useState<string>(DEFAULT_COLOR);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => { inputRef.current?.focus(); }, []);
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (panelRef.current && !panelRef.current.contains(t) && !anchorRef.current?.contains(t)) onClose();
+    };
+    const id = setTimeout(() => document.addEventListener('mousedown', handler), 80);
+    return () => { clearTimeout(id); document.removeEventListener('mousedown', handler); };
+  }, [onClose, anchorRef]);
+
+  const pos = useAnchoredPosition(() => anchorRef.current?.getBoundingClientRect() ?? null, panelRef, true);
+  const submit = () => { const n = name.trim(); if (n) onAdd(n, color); };
+
+  return createPortal(
+    <div
+      ref={panelRef}
+      className="edit-panel add-panel"
+      style={{ top: pos?.top ?? 0, left: pos?.left ?? 0, visibility: pos ? 'visible' : 'hidden' }}
+    >
+      <input
+        ref={inputRef}
+        className="edit-panel-input"
+        placeholder="Habit name…"
+        value={name}
+        onChange={e => setName(e.target.value)}
+        onKeyDown={e => { if (e.key === 'Enter') submit(); if (e.key === 'Escape') onClose(); }}
+      />
+      <div className="color-pick-row">
+        <label className="color-picker-label" title="Pick a color">
+          <div className="color-picker-disc" style={{ background: color }} />
+          <input type="color" value={color} onChange={e => setColor(e.target.value)} />
+          <span className="color-picker-text">Choose color</span>
+          <ColorWheelIcon />
+        </label>
+        <div className="color-preview-strip">
+          {getPalette(color).map((c, i) => (
+            <div key={i} className="color-strip-step" style={{ background: c }} />
+          ))}
+        </div>
+      </div>
+      <div className="edit-panel-actions">
+        <button className="btn-save" onClick={submit}>Add</button>
+        <button className="btn-cancel" onClick={onClose}>Cancel</button>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
 // ─── HabitRow ─────────────────────────────────────────────────────────────────
 
 interface RowProps {
@@ -533,27 +701,37 @@ interface RowProps {
   dates: Date[];
   isCurrentDay: boolean;
   onToggle:         (id: string, ds: string) => void;
+  onMiddleToggle:   (id: string, ds: string) => void;
   onRightClick:     (id: string, ds: string, rect: DOMRect) => void;
   onCommentHover:   (text: string, ds: string, rect: DOMRect) => void;
   onCommentLeave:   () => void;
   editMode: boolean;
   isEditing: boolean;
-  onOpenEdit: (rect: DOMRect) => void;
+  onOpenEdit: () => void;
   analyticsView: 0 | 1 | 2;
+  isDragging: boolean;
+  isDragOver: boolean;
+  onDragStartRow: (id: string) => void;
+  onDragOverRow:  (id: string) => void;
+  onDropRow:      (srcId: string, targetId: string) => void;
+  onDragEndRow:   () => void;
 }
 
 const HabitRow = memo(function HabitRow(
-  { habit, dates, isCurrentDay, onToggle, onRightClick, onCommentHover, onCommentLeave,
-    editMode, isEditing, onOpenEdit, analyticsView }: RowProps
+  { habit, dates, isCurrentDay, onToggle, onMiddleToggle, onRightClick, onCommentHover, onCommentLeave,
+    editMode, isEditing, onOpenEdit, analyticsView,
+    isDragging, isDragOver, onDragStartRow, onDragOverRow, onDropRow, onDragEndRow }: RowProps
 ) {
   const nameRef = useRef<HTMLDivElement>(null);
-  const comp = useMemo(() => new Set(habit.completions), [habit.completions]);
-  const skip = useMemo(() => new Set(habit.skips),       [habit.skips]);
-  const fail = useMemo(() => new Set(habit.fails),       [habit.fails]);
+  const comp  = useMemo(() => new Set(habit.completions), [habit.completions]);
+  const skip  = useMemo(() => new Set(habit.skips),       [habit.skips]);
+  const fail  = useMemo(() => new Set(habit.fails),       [habit.fails]);
+  const bonus = useMemo(() => new Set(habit.bonuses ?? []), [habit.bonuses]);
   const cur  = useMemo(() => calcCurrentStreak(habit.completions, habit.skips),  [habit.completions, habit.skips]);
   const lon  = useMemo(() => calcLongestStreak(habit.completions, habit.skips),  [habit.completions, habit.skips]);
-  const best = cur > 0 && cur >= lon;
   const acc  = getAccent(habit.color);
+  const doneToday = comp.has(fmt(todayNoon()));   // completed for today?
+  const urgeMax   = lon > 0 && cur >= lon && !doneToday; // at record run but today not done yet
 
   const wkCnt  = useMemo(() => countFrom(habit.completions, startOfWeek()),  [habit.completions]);
   const moCnt  = useMemo(() => countFrom(habit.completions, startOfMonth()), [habit.completions]);
@@ -566,13 +744,29 @@ const HabitRow = memo(function HabitRow(
     <>
       <div
         ref={nameRef}
-        className={`cell habit-name${isEditing ? ' editing' : ''}`}
+        data-hid={habit.id}
+        className={`cell habit-name${isEditing ? ' editing' : ''}${editMode ? ' draggable' : ''}${isDragging ? ' dragging' : ''}${isDragOver ? ' drag-over' : ''}`}
+        draggable={editMode}
+        onDragStart={editMode ? e => {
+          e.dataTransfer.effectAllowed = 'move';
+          e.dataTransfer.setData('text/plain', habit.id);
+          onDragStartRow(habit.id);
+        } : undefined}
+        onDragEnter={editMode ? e => { e.preventDefault(); onDragOverRow(habit.id); } : undefined}
+        onDragOver={editMode ? e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; } : undefined}
+        onDrop={editMode ? e => {
+          e.preventDefault();
+          const src = e.dataTransfer.getData('text/plain');
+          if (src) onDropRow(src, habit.id);
+        } : undefined}
+        onDragEnd={editMode ? () => onDragEndRow() : undefined}
       >
+        {editMode && <span className="drag-grip" title="Drag to reorder"><GripIcon /></span>}
         <span className="habit-name-text">{habit.name}</span>
         {editMode && (
           <button
             className="edit-icon-btn"
-            onClick={() => nameRef.current && onOpenEdit(nameRef.current.getBoundingClientRect())}
+            onClick={() => onOpenEdit()}
             title="Edit habit"
           >
             <PencilIcon />
@@ -585,6 +779,7 @@ const HabitRow = memo(function HabitRow(
         const done  = comp.has(ds);
         const skpd  = skip.has(ds);
         const faild = fail.has(ds);
+        const bns   = done && bonus.has(ds);
         const str   = (done || skpd) ? streakAt(comp, skip, ds) : 0;
         const bg    = cellBg(str, habit.color);
         const isTd  = isCurrentDay && i === dates.length - 1;
@@ -602,9 +797,13 @@ const HabitRow = memo(function HabitRow(
         return (
           <div
             key={`${habit.id}-${i}`}
-            className={`cell habit-cell${isTd ? ' today-col' : ''}${faild ? ' failed-cell' : ''}${hasComment ? ' has-comment' : ''}`}
-            style={done ? { backgroundColor: bg } : faild ? { '--fail-color': acc } as React.CSSProperties : undefined}
+            className={`cell habit-cell${isTd ? ' today-col' : ''}${faild ? ' failed-cell' : ''}${hasComment ? ' has-comment' : ''}${bns ? ' bonus-cell' : ''}`}
+            style={bns ? undefined : done ? { backgroundColor: bg } : faild ? { '--fail-color': acc } as React.CSSProperties : undefined}
             onClick={() => onToggle(habit.id, ds)}
+            onMouseDown={e => { if (e.button === 1) e.preventDefault(); }}
+            onAuxClick={e => {
+              if (e.button === 1) { e.preventDefault(); onMiddleToggle(habit.id, ds); }
+            }}
             onContextMenu={e => {
               e.preventDefault();
               onRightClick(habit.id, ds, (e.currentTarget as HTMLElement).getBoundingClientRect());
@@ -619,6 +818,7 @@ const HabitRow = memo(function HabitRow(
             {showLeft  && <div className="cell-skip cell-skip-left"  style={{ background: bg }} />}
             {showRight && <div className="cell-skip cell-skip-right" style={{ background: bg }} />}
             {faild && <div className="cell-fail" />}
+            {bns && <span className="cell-money">$</span>}
             {hasComment && (() => {
               const pal = getPalette(habit.color);
               // On colored cells: dot is 1-2 shades deeper than cell bg.
@@ -638,15 +838,17 @@ const HabitRow = memo(function HabitRow(
 
       {analyticsView === 0 && <>
         <div className="cell stat-cell">
-          {best ? <span className="streak-badge" style={{ background: acc }}>{cur}</span>
-                : <span className="stat-num">{cur || ''}</span>}
+          {doneToday ? <span className="streak-badge" style={{ background: acc }}>{cur}</span>
+                     : <span className="stat-num">{cur || ''}</span>}
         </div>
         <div className="cell stat-cell">
-          {best ? <span className="streak-badge" style={{ background: acc }}>{lon}</span>
-                : <span className="stat-num">{lon || ''}</span>}
-        </div>
-        <div className="cell stat-cell">
-          <span className="stat-num">{habit.completions.length}</span>
+          <span
+            className={`stat-num${urgeMax ? ' streak-urge' : ''}`}
+            style={urgeMax ? { color: acc, textDecorationColor: acc } : undefined}
+            title={urgeMax ? 'You\u2019re at your record streak \u2014 complete it today to extend it!' : undefined}
+          >
+            {lon || ''}
+          </span>
         </div>
       </>}
 
@@ -671,23 +873,164 @@ const HabitRow = memo(function HabitRow(
   );
 });
 
+// ─── Daily Progress (gamified) ──────────────────────────────────────────────
+
+interface DayPip { id: string; name: string; color: string; done: boolean; bonus: boolean; price: number; bonusPrice: number; }
+
+const DailyProgress = memo(function DailyProgress(
+  { pips, done, total, viewingToday, daySeed, earned, dayStreak }: {
+    pips: DayPip[]; done: number; total: number; viewingToday: boolean;
+    daySeed: number; earned: number; dayStreak: number;
+  }
+) {
+  const remaining = total - done;
+  const percent   = total === 0 ? 0 : Math.round((done / total) * 100);
+  const allDone   = total > 0 && remaining === 0;
+  const quote     = getQuote(done, total, daySeed);
+
+  // ring geometry
+  const R = 30, C = 2 * Math.PI * R;
+  const dash = C * (total === 0 ? 0 : done / total);
+
+  return (
+    <section className={`daily-progress${allDone ? ' is-complete' : ''}`}>
+      <div className="dp-ring" role="img" aria-label={`${percent}% of habits complete`}>
+        <svg width="74" height="74" viewBox="0 0 74 74">
+          <circle className="dp-ring-track" cx="37" cy="37" r={R} />
+          <circle
+            className="dp-ring-fill"
+            cx="37" cy="37" r={R}
+            strokeDasharray={`${dash} ${C}`}
+            transform="rotate(-90 37 37)"
+          />
+        </svg>
+        <div className="dp-ring-label">
+          {allDone ? <span className="dp-check">{'\u2713'}</span>
+                   : <span className="dp-pct">{percent}%</span>}
+        </div>
+      </div>
+
+      <div className="dp-body">
+        <div className="dp-top">
+          <span className="dp-title">
+            {viewingToday ? 'Today' : 'Today (so far)'}
+          </span>
+          <span className="dp-counts">
+            <strong>{done}</strong> / {total} done
+            {remaining > 0 && <span className="dp-left"> {'\u00b7'} {remaining} to go</span>}
+          </span>
+          <span className="dp-top-right">
+            <span
+              className={`dp-streak${dayStreak > 0 ? '' : ' zero'}`}
+              title="Days in a row with every habit completed"
+            >
+              <FlameIcon active={dayStreak > 0} />
+              {dayStreak > 0
+                ? <>{dayStreak} day{dayStreak === 1 ? '' : 's'} streak</>
+                : <>No day streak yet</>}
+            </span>
+            <span className="dp-earned" title="Earned today">${earned.toFixed(2)}</span>
+          </span>
+        </div>
+
+        <div className="dp-pips" aria-hidden="true">
+          {pips.map(p => (
+            <span
+              key={p.id}
+              className={`dp-pip${p.done ? ' filled' : ''}${p.bonus ? ' bonus' : ''}`}
+              style={p.done && !p.bonus ? { background: p.color, boxShadow: `0 0 0 1px ${p.color}` } : undefined}
+              title={`${p.name}${p.bonus ? ` \u2014 $${p.bonusPrice.toFixed(2)}` : p.done ? ` \u2014 $${p.price.toFixed(2)}` : ` \u2014 $${p.price.toFixed(2)} when done`}`}
+            >
+              {p.bonus ? '$' : ''}
+            </span>
+          ))}
+          {total === 0 && <span className="dp-pip-empty">No habits yet</span>}
+        </div>
+
+        <div className="dp-quote">
+          <span className="dp-quote-text">{quote.text}</span>
+          <span className="dp-quote-source">{'\u2014 '}{quote.source}</span>
+        </div>
+      </div>
+    </section>
+  );
+});
+
+// ─── MoneyMenu — top-right balance with a hover "spend" popover ──────────────
+
+const MoneyMenu = memo(function MoneyMenu(
+  { earned, spent, onSpend }: { earned: number; spent: number; onSpend: (amt: number) => void; }
+) {
+  const [open, setOpen] = useState(false);
+  const [amt, setAmt]   = useState('');
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const balance = earned - spent;
+
+  const openNow  = () => { if (closeTimer.current) clearTimeout(closeTimer.current); setOpen(true); };
+  const closeSoon = () => { closeTimer.current = setTimeout(() => setOpen(false), 220); };
+
+  const submit = () => {
+    const v = parseFloat(amt);
+    if (Number.isFinite(v) && v > 0) { onSpend(v); setAmt(''); }
+  };
+
+  return (
+    <div className="money-wrap" onMouseEnter={openNow} onMouseLeave={closeSoon}>
+      <MoneyIcon />
+      <span
+        className={`score money-score${balance < 0 ? ' negative' : ''}`}
+        title="Hover to spend money"
+      >
+        ${balance.toFixed(2)}
+      </span>
+
+      {open && (
+        <div className="money-menu" onMouseEnter={openNow} onMouseLeave={closeSoon}>
+          <div className="money-menu-rows">
+            <div className="money-menu-row"><span>Earned</span><span className="mm-pos">+${earned.toFixed(2)}</span></div>
+            <div className="money-menu-row"><span>Spent</span><span className="mm-neg">-${spent.toFixed(2)}</span></div>
+            <div className="money-menu-row money-menu-total"><span>Balance</span><span>${balance.toFixed(2)}</span></div>
+          </div>
+          <div className="money-spend">
+            <span className="money-spend-prefix">$</span>
+            <input
+              type="number"
+              inputMode="decimal"
+              min="0"
+              step="0.01"
+              placeholder="0.00"
+              value={amt}
+              onChange={e => setAmt(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') submit(); }}
+            />
+            <button className="btn-spend" onClick={submit}>Spend</button>
+          </div>
+          {spent > 0 && (
+            <button className="money-reset" onClick={() => onSpend(-spent)}>Reset spending</button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+});
+
 // ─── App ──────────────────────────────────────────────────────────────────────
 
 export default function App() {
   const [habits,         setHabits]         = useState<Habit[]>(loadHabits);
   const [offset,         setOffset]         = useState(0);
   const [adding,         setAdding]         = useState(false);
-  const [newName,        setNewName]        = useState('');
-  const [newColor,       setNewColor]       = useState<string>(DEFAULT_COLOR);
+  const [spent,          setSpent]          = useState<number>(loadSpent);
   const [editMode,       setEditMode]       = useState(false);
   const [editingId,      setEditingId]      = useState<string | null>(null);
-  const [editAnchorRect, setEditAnchorRect] = useState<DOMRect | null>(null);
+  const [draggingId,     setDraggingId]     = useState<string | null>(null);
+  const [dragOverId,     setDragOverId]     = useState<string | null>(null);
   const [analyticsView,  setAnalyticsView]  = useState<0 | 1 | 2>(0);
   const [syncStatus,     setSyncStatus]     = useState<'idle'|'syncing'|'synced'|'error'>('idle');
   const [showArchive,    setShowArchive]    = useState(false);
   const [commentTarget,  setCommentTarget]  = useState<{ id: string; ds: string; rect: DOMRect } | null>(null);
   const [commentTooltip, setCommentTooltip] = useState<{ text: string; ds: string; rect: DOMRect } | null>(null);
-  const addInputRef  = useRef<HTMLInputElement>(null);
+  const addBtnRef    = useRef<HTMLButtonElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const syncTimer    = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isFirstLoad  = useRef(true);
@@ -702,6 +1045,12 @@ export default function App() {
   // Split into active (visible) and archived
   const visibleHabits  = useMemo(() => habits.filter(h => !h.archived), [habits]);
   const archivedHabits = useMemo(() => habits.filter(h =>  h.archived), [habits]);
+
+  useEffect(() => { localStorage.setItem(SPENT_KEY, String(spent)); }, [spent]);
+
+  const spend = useCallback((amt: number) => {
+    setSpent(s => Math.max(0, Math.round((s + amt) * 100) / 100));
+  }, []);
 
   // Persist locally + debounce cloud push
   useEffect(() => {
@@ -736,7 +1085,6 @@ export default function App() {
       .finally(() => { isFirstLoad.current = false; });
   }, []);
 
-  useEffect(() => { if (adding) addInputRef.current?.focus(); }, [adding]);
 
   // Cycle: empty → done → skip → fail → empty
   const toggle = useCallback((id: string, ds: string) => {
@@ -745,12 +1093,13 @@ export default function App() {
       const done = h.completions.includes(ds);
       const skpd = h.skips.includes(ds);
       const fail = h.fails.includes(ds);
+      const dropBonus = (h.bonuses ?? []).filter(b => b !== ds);
       if (!done && !skpd && !fail)
         return { ...h, completions: [...h.completions, ds] };
       if (done) {
         if (wouldExceedSkipRun(h.skips, ds, 2))
-          return { ...h, completions: h.completions.filter(c => c !== ds), fails: [...h.fails, ds] };
-        return { ...h, completions: h.completions.filter(c => c !== ds), skips: [...h.skips, ds] };
+          return { ...h, completions: h.completions.filter(c => c !== ds), fails: [...h.fails, ds], bonuses: dropBonus };
+        return { ...h, completions: h.completions.filter(c => c !== ds), skips: [...h.skips, ds], bonuses: dropBonus };
       }
       if (skpd)
         return { ...h, skips: h.skips.filter(s => s !== ds), fails: [...h.fails, ds] };
@@ -758,30 +1107,49 @@ export default function App() {
     }));
   }, []);
 
-  const addHabit = useCallback(() => {
-    const name = newName.trim();
-    if (!name) return;
-    setHabits(prev => [...prev, {
-      id: `h-${Date.now()}`, name, color: newColor,
-      completions: [], skips: [], fails: [],
-    }]);
-    setNewName(''); setNewColor(DEFAULT_COLOR); setAdding(false);
-  }, [newName, newColor]);
+  // Middle-click: toggle a $1 "bonus" completion (done + worth a dollar)
+  const toggleBonus = useCallback((id: string, ds: string) => {
+    setHabits(prev => prev.map(h => {
+      if (h.id !== id) return h;
+      const bonuses = h.bonuses ?? [];
+      if (bonuses.includes(ds))
+        // already a $1 day → clear it back to empty
+        return { ...h, completions: h.completions.filter(c => c !== ds), bonuses: bonuses.filter(b => b !== ds) };
+      // mark as a $1 completion regardless of prior state
+      return {
+        ...h,
+        completions: h.completions.includes(ds) ? h.completions : [...h.completions, ds],
+        skips: h.skips.filter(s => s !== ds),
+        fails: h.fails.filter(f => f !== ds),
+        bonuses: [...bonuses, ds],
+      };
+    }));
+  }, []);
 
-  const saveEdit = useCallback((name: string, color: HabitColor) => {
-    setHabits(prev => prev.map(h => h.id === editingId ? { ...h, name, color } : h));
-    setEditingId(null); setEditAnchorRect(null);
+  const addHabit = useCallback((name: string, color: string) => {
+    const n = name.trim();
+    if (!n) return;
+    setHabits(prev => [...prev, {
+      id: `h-${Date.now()}`, name: n, color,
+      completions: [], skips: [], fails: [], bonuses: [],
+    }]);
+    setAdding(false);
+  }, []);
+
+  const saveEdit = useCallback((name: string, color: HabitColor, price: number, bonusPrice: number) => {
+    setHabits(prev => prev.map(h => h.id === editingId ? { ...h, name, color, price, bonusPrice } : h));
+    setEditingId(null);
   }, [editingId]);
 
   const deleteHabit = useCallback(() => {
     if (!window.confirm('Delete this habit?')) return;
     setHabits(prev => prev.filter(h => h.id !== editingId));
-    setEditingId(null); setEditAnchorRect(null);
+    setEditingId(null);
   }, [editingId]);
 
   const archiveHabit = useCallback(() => {
     setHabits(prev => prev.map(h => h.id === editingId ? { ...h, archived: true } : h));
-    setEditingId(null); setEditAnchorRect(null);
+    setEditingId(null);
   }, [editingId]);
 
   const restoreHabit = useCallback((id: string) => {
@@ -793,29 +1161,32 @@ export default function App() {
     setHabits(prev => prev.filter(h => h.id !== id));
   }, []);
 
-  // Move operates within visible (non-archived) habits, but swaps in the full array
-  const moveHabit = useCallback((dir: -1 | 1) => {
+  // Drag-and-drop reordering (active in edit mode)
+  const handleDragStart = useCallback((id: string) => setDraggingId(id), []);
+  const handleDragOver  = useCallback((id: string) => setDragOverId(id), []);
+  const handleDragEnd   = useCallback(() => { setDraggingId(null); setDragOverId(null); }, []);
+  const reorderHabit = useCallback((srcId: string, targetId: string) => {
+    setDraggingId(null); setDragOverId(null);
+    if (srcId === targetId) return;
     setHabits(prev => {
-      const visible = prev.filter(h => !h.archived);
-      const visIdx = visible.findIndex(h => h.id === editingId);
-      if (visIdx < 0) return prev;
-      const nextVisIdx = visIdx + dir;
-      if (nextVisIdx < 0 || nextVisIdx >= visible.length) return prev;
-      const idxA = prev.findIndex(h => h.id === visible[visIdx].id);
-      const idxB = prev.findIndex(h => h.id === visible[nextVisIdx].id);
-      const arr = [...prev];
-      [arr[idxA], arr[idxB]] = [arr[idxB], arr[idxA]];
-      return arr;
+      const from = prev.findIndex(h => h.id === srcId);
+      const to   = prev.findIndex(h => h.id === targetId);
+      if (from < 0 || to < 0) return prev;
+      const next = [...prev];
+      const [moved] = next.splice(from, 1);
+      let insertAt = next.findIndex(h => h.id === targetId);
+      if (from < to) insertAt += 1;   // dropping below → place after target
+      next.splice(insertAt, 0, moved);
+      return next;
     });
-    setEditAnchorRect(r => r ? new DOMRect(r.x, r.y + dir * layout.rowH, r.width, r.height) : r);
-  }, [editingId, layout.rowH]);
-
-  const cancelEdit = useCallback(() => {
-    setEditingId(null); setEditAnchorRect(null);
   }, []);
 
-  const openEdit = useCallback((id: string, rect: DOMRect) => {
-    setEditingId(id); setEditAnchorRect(rect);
+  const cancelEdit = useCallback(() => {
+    setEditingId(null);
+  }, []);
+
+  const openEdit = useCallback((id: string) => {
+    setEditingId(id);
   }, []);
 
   const openComment = useCallback((id: string, ds: string, rect: DOMRect) => {
@@ -843,15 +1214,45 @@ export default function App() {
   }, []);
   const hideCommentTooltip = useCallback(() => setCommentTooltip(null), []);
 
-  const totalScore = useMemo(() => habits.reduce((s, h) => s + h.completions.length, 0), [habits]);
+  // Per-habit pricing: `price` per completion, `bonusPrice` for middle-click "bonus" days
+  const totalMoney = useMemo(() => habits.reduce((sum, h) => {
+    const b  = new Set(h.bonuses ?? []);
+    const pr = h.price      ?? DEFAULT_PRICE;
+    const bp = h.bonusPrice ?? DEFAULT_BONUS_PRICE;
+    return sum + h.completions.reduce((s, ds) => s + (b.has(ds) ? bp : pr), 0);
+  }, 0), [habits]);
   const dailyCount = useCallback((ds: string) =>
     visibleHabits.filter(h => h.completions.includes(ds)).length,
   [visibleHabits]);
 
+  // Today's progress (always real "today", regardless of which day is in view)
+  const todayStr = fmt(todayNoon());
+  const todayPips = useMemo(
+    () => visibleHabits.map(h => ({
+      id: h.id, name: h.name, color: h.color,
+      done: h.completions.includes(todayStr),
+      bonus: (h.bonuses ?? []).includes(todayStr),
+      price:      h.price      ?? DEFAULT_PRICE,
+      bonusPrice: h.bonusPrice ?? DEFAULT_BONUS_PRICE,
+    })),
+    [visibleHabits, todayStr],
+  );
+  const todayDone  = todayPips.filter(p => p.done).length;
+  const todayMoney = todayPips.reduce((s, p) => s + (p.done ? (p.bonus ? p.bonusPrice : p.price) : 0), 0);
+  const dayStreak  = useMemo(() => calcDayStreak(visibleHabits), [visibleHabits]);
+  // Stable per-day seed so "start"/"victory" quotes vary day to day.
+  const daySeed = useMemo(() => {
+    const d = todayNoon();
+    return d.getFullYear() * 1000 + Math.floor(
+      (d.getTime() - new Date(d.getFullYear(), 0, 0).getTime()) / 86400000,
+    );
+  }, [todayStr]);
+
   const { wName, wDay, wToday, wStat, daysBack, rowH, isMobile } = layout;
+  const statCount = STAT_HEADERS[analyticsView].length;
   const gridCols = isCurrentDay
-    ? `${wName}px repeat(${daysBack}, ${wDay}px) ${wToday}px repeat(3, ${wStat}px)`
-    : `${wName}px repeat(${daysBack + 1}, ${wDay}px) repeat(3, ${wStat}px)`;
+    ? `${wName}px repeat(${daysBack}, ${wDay}px) ${wToday}px repeat(${statCount}, ${wStat}px)`
+    : `${wName}px repeat(${daysBack + 1}, ${wDay}px) repeat(${statCount}, ${wStat}px)`;
 
   const exportData = useCallback(() => {
     const blob = new Blob([JSON.stringify(habits, null, 2)], { type: 'application/json' });
@@ -880,7 +1281,6 @@ export default function App() {
   }, []);
 
   const editingHabit = editingId ? visibleHabits.find(h => h.id === editingId) : null;
-  const editingIdx   = editingId ? visibleHabits.findIndex(h => h.id === editingId) : -1;
 
   return (
     <div className={`app${isMobile ? ' mobile' : ''}`} style={{ '--row-h': `${rowH}px` } as React.CSSProperties}>
@@ -919,11 +1319,21 @@ export default function App() {
               syncStatus === 'error'   ? 'Sync failed' : ''
             } />
           )}
-          <TrophyIcon />
-          <span className="score">{totalScore}</span>
+          <MoneyMenu earned={totalMoney} spent={spent} onSpend={spend} />
           {!isMobile && <span className="username">Kevin ▾</span>}
         </div>
       </header>
+
+      {/* ── Daily progress ── */}
+      <DailyProgress
+        pips={todayPips}
+        done={todayDone}
+        total={todayPips.length}
+        viewingToday={isCurrentDay}
+        daySeed={daySeed}
+        earned={todayMoney}
+        dayStreak={dayStreak}
+      />
 
       {/* ── Board ── */}
       <div className="board-scroll">
@@ -982,58 +1392,32 @@ export default function App() {
                 dates={dates}
                 isCurrentDay={isCurrentDay}
                 onToggle={toggle}
+                onMiddleToggle={toggleBonus}
                 onRightClick={openComment}
                 onCommentHover={showCommentTooltip}
                 onCommentLeave={hideCommentTooltip}
                 editMode={editMode}
                 isEditing={editingId === habit.id}
-                onOpenEdit={rect => openEdit(habit.id, rect)}
+                onOpenEdit={() => openEdit(habit.id)}
                 analyticsView={analyticsView}
+                isDragging={draggingId === habit.id}
+                isDragOver={dragOverId === habit.id && draggingId !== habit.id}
+                onDragStartRow={handleDragStart}
+                onDragOverRow={handleDragOver}
+                onDropRow={reorderHabit}
+                onDragEndRow={handleDragEnd}
               />
             ))}
 
             {/* ─ Footer ─ */}
             <div className="cell footer-name">
-              {adding ? (
-                <div className="add-form">
-                  <input
-                    ref={addInputRef}
-                    className="add-input"
-                    placeholder="Habit name…"
-                    value={newName}
-                    onChange={e => setNewName(e.target.value)}
-                    onKeyDown={e => {
-                      if (e.key === 'Enter') addHabit();
-                      if (e.key === 'Escape') { setAdding(false); setNewName(''); }
-                    }}
-                  />
-                  <div className="color-pick-row">
-                    <label className="color-picker-label" title="Pick a color">
-                      <div className="color-picker-disc" style={{ background: newColor }} />
-                      <input
-                        type="color"
-                        value={newColor}
-                        onChange={e => setNewColor(e.target.value)}
-                      />
-                      <span className="color-picker-text">Choose color</span>
-                      <ColorWheelIcon />
-                    </label>
-                    <div className="color-preview-strip">
-                      {getPalette(newColor).map((c, i) => (
-                        <div key={i} className="color-strip-step" style={{ background: c }} />
-                      ))}
-                    </div>
-                  </div>
-                  <div className="add-actions">
-                    <button className="btn-save" onClick={addHabit}>Add</button>
-                    <button className="btn-cancel" onClick={() => { setAdding(false); setNewName(''); }}>Cancel</button>
-                  </div>
-                </div>
-              ) : (
-                <button className="add-btn" onClick={() => setAdding(true)}>
-                  <span className="add-plus">+</span> New Habit
-                </button>
-              )}
+              <button
+                ref={addBtnRef}
+                className={`add-btn${adding ? ' active' : ''}`}
+                onClick={() => setAdding(a => !a)}
+              >
+                <span className="add-plus">+</span> New Habit
+              </button>
             </div>
 
             {dates.map((d, i) => {
@@ -1046,7 +1430,7 @@ export default function App() {
               );
             })}
 
-            <div className="cell footer-progress" style={{ gridColumn: 'span 3' }}>
+            <div className="cell footer-progress" style={{ gridColumn: `span ${statCount}` }}>
               <input
                 type="range"
                 className="analytics-slider"
@@ -1060,19 +1444,19 @@ export default function App() {
         </div>
       </div>
 
+      {/* ── Add Habit Panel (portal, never clipped by overflow) ── */}
+      {adding && (
+        <AddPanel anchorRef={addBtnRef} onAdd={addHabit} onClose={() => setAdding(false)} />
+      )}
+
       {/* ── Edit Panel (portal, never clipped by overflow) ── */}
-      {editingHabit && editAnchorRect && (
+      {editingHabit && (
         <EditPanel
           habit={editingHabit}
-          anchorRect={editAnchorRect}
-          isFirst={editingIdx === 0}
-          isLast={editingIdx === visibleHabits.length - 1}
           onSave={saveEdit}
           onCancel={cancelEdit}
           onDelete={deleteHabit}
           onArchive={archiveHabit}
-          onMoveUp={() => moveHabit(-1)}
-          onMoveDown={() => moveHabit(1)}
         />
       )}
 
@@ -1130,15 +1514,23 @@ function LogoMark() {
     </svg>
   );
 }
-function TrophyIcon() {
+function MoneyIcon() {
   return (
-    <svg width="15" height="15" viewBox="0 0 24 24" fill="none"
-      stroke="#ca8a04" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"/><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"/>
-      <path d="M4 22h16"/>
-      <path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22"/>
-      <path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22"/>
-      <path d="M18 2H6v7a6 6 0 0 0 12 0V2Z"/>
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+      stroke="#16a34a" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="2" y="6" width="20" height="12" rx="2"/>
+      <circle cx="12" cy="12" r="2.5"/>
+      <path d="M6 12h.01M18 12h.01"/>
+    </svg>
+  );
+}
+function FlameIcon({ active }: { active: boolean }) {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24"
+      fill={active ? '#f97316' : 'none'}
+      stroke={active ? '#ea580c' : '#94a3b8'} strokeWidth="2"
+      strokeLinecap="round" strokeLinejoin="round">
+      <path d="M8.5 14.5A2.5 2.5 0 0 0 11 17c1.4 0 2.5-1.1 2.5-2.5 0-1-.5-1.8-1-2.5-.5-.7-1-1.5-1-2.5 0-1.5 1-3 1-3s-3 1-4.5 3.5C7 9.7 6 11 6 13a6 6 0 0 0 12 0c0-2.5-1.5-4.5-2.5-6"/>
     </svg>
   );
 }
@@ -1201,19 +1593,12 @@ function SlidersIcon() {
     </svg>
   );
 }
-function ArrowUpIcon() {
+function GripIcon() {
   return (
-    <svg width="11" height="11" viewBox="0 0 24 24" fill="none"
-      stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M12 19V5M5 12l7-7 7 7"/>
-    </svg>
-  );
-}
-function ArrowDownIcon() {
-  return (
-    <svg width="11" height="11" viewBox="0 0 24 24" fill="none"
-      stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M12 5v14M19 12l-7 7-7-7"/>
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/>
+      <circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/>
+      <circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/>
     </svg>
   );
 }

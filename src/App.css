@@ -45,8 +45,210 @@ body {
 
 .user-bar { display: flex; align-items: center; gap: 6px; font-size: 14px; margin-left: 10px; }
 .score { font-weight: 700; color: #16a34a; font-size: 15px; }
+.money-score { font-variant-numeric: tabular-nums; letter-spacing: -0.2px; cursor: default; }
+.money-score.negative { color: #ef4444; }
+
+/* ─── Money menu (hover to spend) ────────────────────────────────────────── */
+.money-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.money-menu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 8px;
+  z-index: 9999;
+  width: 200px;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 12px;
+  box-shadow: 0 12px 32px rgba(0,0,0,0.16), 0 2px 8px rgba(0,0,0,0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  animation: fade-in 0.12s ease;
+  cursor: default;
+}
+/* invisible bridge so the mouse can travel from score to menu without closing */
+.money-menu::before {
+  content: '';
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  right: 0;
+  height: 8px;
+}
+.money-menu-rows { display: flex; flex-direction: column; gap: 4px; }
+.money-menu-row {
+  display: flex; justify-content: space-between; align-items: center;
+  font-size: 12.5px; color: #64748b;
+}
+.money-menu-row .mm-pos { color: #16a34a; font-weight: 700; font-variant-numeric: tabular-nums; }
+.money-menu-row .mm-neg { color: #ef4444; font-weight: 700; font-variant-numeric: tabular-nums; }
+.money-menu-total {
+  border-top: 1px solid #f1f5f9;
+  padding-top: 5px; margin-top: 1px;
+  color: #0f172a; font-weight: 800; font-size: 14px;
+}
+.money-menu-total span:last-child { font-variant-numeric: tabular-nums; }
+.money-spend { display: flex; align-items: center; gap: 5px; }
+.money-spend-prefix { color: #64748b; font-weight: 700; font-size: 13px; }
+.money-spend input {
+  width: 100%; min-width: 0;
+  border: 1px solid #e2e8f0; border-radius: 6px;
+  padding: 5px 8px; font-size: 13px; font-family: inherit; color: #0f172a; outline: none;
+}
+.money-spend input:focus { border-color: #16a34a; }
+.btn-spend {
+  background: #16a34a; color: #fff; border: none; border-radius: 6px;
+  padding: 5px 11px; font-size: 12px; font-weight: 700; font-family: inherit;
+  cursor: pointer; white-space: nowrap; transition: background 0.1s;
+}
+.btn-spend:hover { background: #15803d; }
+.money-reset {
+  background: none; border: none; color: #94a3b8; cursor: pointer;
+  font-size: 11px; font-family: inherit; padding: 0; text-align: left;
+}
+.money-reset:hover { color: #ef4444; text-decoration: underline; }
 .username { color: #64748b; cursor: pointer; }
 .username:hover { color: #0f172a; }
+
+/* ─── Daily progress (gamified) ──────────────────────────────────────────── */
+.daily-progress {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 14px 32px;
+  background: linear-gradient(135deg, #f0fdf4 0%, #ffffff 60%);
+  border-bottom: 1px solid #e2e8f0;
+}
+.daily-progress.is-complete {
+  background: linear-gradient(135deg, #dcfce7 0%, #f0fdf4 70%);
+}
+
+/* Ring */
+.dp-ring { position: relative; width: 74px; height: 74px; flex-shrink: 0; }
+.dp-ring-track { fill: none; stroke: #e2e8f0; stroke-width: 7; }
+.dp-ring-fill {
+  fill: none;
+  stroke: #16a34a;
+  stroke-width: 7;
+  stroke-linecap: round;
+  transition: stroke-dasharray 0.5s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.daily-progress.is-complete .dp-ring-fill { stroke: #15803d; }
+.dp-ring-label {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #15803d;
+  font-weight: 800;
+  letter-spacing: -0.5px;
+  font-variant-numeric: tabular-nums;
+}
+.dp-pct { font-size: 16px; line-height: 1; }
+.dp-check { font-size: 28px; font-weight: 700; line-height: 1; }
+
+/* Body */
+.dp-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 7px; }
+.dp-top { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.dp-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: #0f172a;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.dp-counts { font-size: 13px; color: #475569; }
+.dp-counts strong { color: #16a34a; font-size: 15px; font-weight: 800; }
+.dp-left { color: #94a3b8; }
+
+/* Pips — one per habit */
+.dp-pips { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
+.dp-pip {
+  width: 22px;
+  height: 8px;
+  border-radius: 99px;
+  background: #e2e8f0;
+  transition: background 0.25s ease, transform 0.25s ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.dp-pip.filled { transform: scaleY(1.05); }
+.dp-pip.bonus {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, #fde68a, #f59e0b);
+  box-shadow: 0 0 0 1px #d97706, 0 1px 2px rgba(180,120,0,0.4);
+  color: #7c4a03;
+  font-size: 9px;
+  font-weight: 800;
+}
+.dp-pip-empty { font-size: 12px; color: #94a3b8; font-style: italic; }
+
+.dp-top-right {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.dp-streak {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #c2410c;
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  border-radius: 99px;
+  padding: 1px 9px 1px 7px;
+}
+.dp-streak.zero { color: #94a3b8; background: #f8fafc; border-color: #e2e8f0; font-weight: 600; }
+.dp-earned {
+  font-size: 13px;
+  font-weight: 800;
+  color: #16a34a;
+  font-variant-numeric: tabular-nums;
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  border-radius: 99px;
+  padding: 1px 9px;
+}
+.daily-progress.is-complete .dp-earned { background: #dcfce7; border-color: #86efac; }
+
+.dp-quote { display: flex; flex-direction: column; gap: 1px; max-width: 560px; }
+.dp-quote-text {
+  font-size: 12.5px;
+  line-height: 1.35;
+  color: #475569;
+  font-style: italic;
+}
+.dp-quote-source {
+  font-size: 11px;
+  color: #94a3b8;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+.daily-progress.is-complete .dp-quote-text { color: #15803d; font-weight: 500; }
+.daily-progress.is-complete .dp-quote-source { color: #16a34a; }
+
+@media (max-width: 639px) {
+  .daily-progress { padding: 10px 12px; gap: 12px; }
+  .dp-ring, .dp-ring svg { width: 58px; height: 58px; }
+  .dp-pct { font-size: 15px; }
+  .dp-check { font-size: 22px; }
+  .dp-pip { width: 16px; height: 7px; }
+}
 
 /* ─── Board scroll ───────────────────────────────────────────────────────── */
 .board-scroll {
@@ -192,6 +394,20 @@ body {
 .habit-name.editing .edit-icon-btn { opacity: 1; }
 .edit-icon-btn:hover { color: #2563eb; background: #eff6ff; }
 
+/* ─── Drag-and-drop reordering (edit mode) ───────────────────────────────── */
+.drag-grip {
+  display: flex; align-items: center; flex-shrink: 0;
+  color: #cbd5e1; margin-left: -4px;
+}
+.habit-name.draggable { cursor: grab; }
+.habit-name.draggable:active { cursor: grabbing; }
+.habit-name.draggable:hover .drag-grip { color: #94a3b8; }
+.habit-name.dragging { opacity: 0.4; }
+.habit-name.drag-over {
+  background: #eff6ff;
+  box-shadow: inset 0 0 0 2px #93c5fd;
+}
+
 /* ─── Habit cells — fully flush, zero borders ────────────────────────────── */
 .habit-cell {
   height: var(--row-h, 42px);
@@ -243,6 +459,25 @@ body {
   background: #f6fef9;
 }
 
+/* ─── Money completions ──────────────────────────────────────────────────── */
+/* $1.00 bonus day (middle-click): gold "coin" cell */
+.habit-cell.bonus-cell {
+  background: linear-gradient(135deg, #fde68a 0%, #fbbf24 55%, #f59e0b 100%) !important;
+  box-shadow: inset 0 0 0 1px rgba(180, 120, 0, 0.35);
+}
+.cell-money {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 800;
+  font-size: 15px;
+  color: #7c4a03;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.45);
+  pointer-events: none;
+}
+
 /* ─── Stat cells ─────────────────────────────────────────────────────────── */
 .stat-cell {
   height: var(--row-h, 42px); display: flex; align-items: center; justify-content: center;
@@ -254,6 +489,18 @@ body {
   display: inline-flex; align-items: center; justify-content: center;
   width: 28px; height: 28px; border-radius: 50%;
   color: #fff; font-size: 12px; font-weight: 800;
+}
+/* "At your record — do it today!" urge cue on the longest-streak number */
+.stat-num.streak-urge {
+  font-weight: 800;
+  text-decoration: underline;
+  text-decoration-thickness: 2px;
+  text-underline-offset: 3px;
+  animation: urge-pulse 1.6s ease-in-out infinite;
+}
+@keyframes urge-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.55; }
 }
 
 /* ─── Footer row ─────────────────────────────────────────────────────────── */
@@ -441,17 +688,28 @@ body {
 }
 .edit-panel-input:focus { border-color: #2563eb; }
 
-.edit-panel-move {
-  display: flex; gap: 6px;
+.price-row {
+  display: flex; gap: 8px;
 }
-.move-btn {
-  display: flex; align-items: center; gap: 4px;
-  background: none; border: 1px solid #e2e8f0; border-radius: 5px;
-  padding: 4px 10px; font-size: 12px; font-family: inherit; color: #475569;
-  cursor: pointer; transition: background 0.1s, color 0.1s;
+.price-field {
+  flex: 1; display: flex; flex-direction: column; gap: 3px;
 }
-.move-btn:hover:not(:disabled) { background: #f1f5f9; color: #0f172a; }
-.move-btn:disabled { opacity: 0.3; cursor: default; }
+.price-label {
+  font-size: 11px; font-weight: 600; color: #64748b;
+  text-transform: uppercase; letter-spacing: 0.02em;
+}
+.price-input-wrap {
+  display: flex; align-items: center;
+  border: 1px solid #e2e8f0; border-radius: 6px;
+  padding: 0 8px; transition: border-color 0.1s;
+}
+.price-input-wrap:focus-within { border-color: #16a34a; }
+.price-prefix { color: #64748b; font-weight: 700; font-size: 13px; }
+.price-input-wrap input {
+  width: 100%; min-width: 0; border: none; outline: none;
+  padding: 6px 4px; font-size: 14px; font-family: inherit; font-weight: 600;
+  color: #0f172a; background: transparent;
+}
 
 .edit-panel-actions {
   display: flex; gap: 6px; align-items: center;
