@@ -356,6 +356,32 @@ body {
   border-left: 1px solid #e2e8f0;
 }
 
+/* ─── Section divider row ─────────────────────────────────────────────────── */
+.section-divider {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px 2px;
+  pointer-events: none;
+}
+.section-divider::before,
+.section-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: #e2e8f0;
+}
+.section-divider-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #94a3b8;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
 /* ─── Habit name column ───────────────────────────────────────────────────── */
 .habit-name {
   height: var(--row-h, 42px);
@@ -714,6 +740,28 @@ body {
 .edit-panel-actions {
   display: flex; gap: 6px; align-items: center;
 }
+
+/* Section label field inside EditPanel */
+.section-label-row {
+  display: flex; align-items: center; gap: 6px;
+  border: 1px solid #e2e8f0; border-radius: 6px;
+  padding: 5px 8px;
+  background: #f8fafc;
+}
+.section-label-prefix {
+  font-size: 14px; font-weight: 700; color: #94a3b8; flex-shrink: 0;
+}
+.section-label-input {
+  flex: 1; border: none; outline: none; background: transparent;
+  font-size: 13px; font-family: inherit; color: #334155;
+  min-width: 0;
+}
+.section-label-input::placeholder { color: #cbd5e1; }
+.section-label-clear {
+  background: none; border: none; cursor: pointer;
+  color: #94a3b8; font-size: 12px; padding: 0 2px; line-height: 1;
+}
+.section-label-clear:hover { color: #ef4444; }
 
 /* ─── Sync status dot ────────────────────────────────────────────────────── */
 .sync-dot {

@@ -10,6 +10,7 @@ export interface Habit {
   bonuses?: string[];    // YYYY-MM-DD — completions worth the bonus price (middle-click)
   price?: number;        // $ earned per normal completion (default 0.10)
   bonusPrice?: number;   // $ earned per middle-click "bonus" completion (default 1.00)
+  sectionBefore?: string; // if set, a named section divider renders above this habit
   isBreak?: boolean;
   archived?: boolean;
   comments?: Record<string, string>; // YYYY-MM-DD → free-text note

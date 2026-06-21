@@ -1,4 +1,5 @@
 import {
+  Fragment,
   useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, memo,
 } from 'react';
 import { createPortal } from 'react-dom';
@@ -309,6 +310,7 @@ function sanitize(h: Partial<Habit>): Habit {
     bonuses:     Array.isArray(h.bonuses)     ? h.bonuses.filter(d => typeof d === 'string')     : [],
     price:       (typeof h.price === 'number'      && isFinite(h.price)      && h.price      >= 0) ? h.price      : undefined,
     bonusPrice:  (typeof h.bonusPrice === 'number' && isFinite(h.bonusPrice) && h.bonusPrice >= 0) ? h.bonusPrice : undefined,
+    sectionBefore: typeof h.sectionBefore === 'string' && h.sectionBefore.trim() ? h.sectionBefore.trim() : undefined,
     isBreak:  !!h.isBreak,
     archived: !!h.archived,
     comments: (h.comments && typeof h.comments === 'object' && !Array.isArray(h.comments))
@@ -512,7 +514,7 @@ function useAnchoredPosition(
 
 interface EditPanelProps {
   habit: Habit;
-  onSave:     (name: string, color: HabitColor, price: number, bonusPrice: number) => void;
+  onSave:     (name: string, color: HabitColor, price: number, bonusPrice: number, sectionBefore: string) => void;
   onCancel:   () => void;
   onDelete:   () => void;
   onArchive:  () => void;
@@ -520,10 +522,11 @@ interface EditPanelProps {
 
 function EditPanel({ habit, onSave, onCancel, onDelete, onArchive }: EditPanelProps) {
 
-  const [name,  setName]  = useState(habit.name);
-  const [color, setColor] = useState<string>(habit.color);
-  const [price,      setPrice]      = useState<string>(String(habit.price      ?? DEFAULT_PRICE));
-  const [bonusPrice, setBonusPrice] = useState<string>(String(habit.bonusPrice ?? DEFAULT_BONUS_PRICE));
+  const [name,          setName]          = useState(habit.name);
+  const [color,         setColor]         = useState<string>(habit.color);
+  const [price,         setPrice]         = useState<string>(String(habit.price      ?? DEFAULT_PRICE));
+  const [bonusPrice,    setBonusPrice]    = useState<string>(String(habit.bonusPrice ?? DEFAULT_BONUS_PRICE));
+  const [sectionBefore, setSectionBefore] = useState(habit.sectionBefore ?? '');
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => { inputRef.current?.focus(); }, []);
@@ -558,6 +561,7 @@ function EditPanel({ habit, onSave, onCancel, onDelete, onArchive }: EditPanelPr
       color,
       Number.isFinite(p)  && p  >= 0 ? p  : DEFAULT_PRICE,
       Number.isFinite(bp) && bp >= 0 ? bp : DEFAULT_BONUS_PRICE,
+      sectionBefore.trim(),
     );
   };
 
@@ -617,6 +621,19 @@ function EditPanel({ habit, onSave, onCancel, onDelete, onArchive }: EditPanelPr
             />
           </span>
         </label>
+      </div>
+      <div className="section-label-row">
+        <span className="section-label-prefix">§</span>
+        <input
+          className="section-label-input"
+          value={sectionBefore}
+          onChange={e => setSectionBefore(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') handleSave(); if (e.key === 'Escape') onCancel(); }}
+          placeholder="Section above this habit (leave blank for none)…"
+        />
+        {sectionBefore && (
+          <button className="section-label-clear" onClick={() => setSectionBefore('')} title="Remove section">✕</button>
+        )}
       </div>
       <div className="edit-panel-actions">
         <button className="btn-save" onClick={handleSave}>Save</button>
@@ -1136,8 +1153,11 @@ export default function App() {
     setAdding(false);
   }, []);
 
-  const saveEdit = useCallback((name: string, color: HabitColor, price: number, bonusPrice: number) => {
-    setHabits(prev => prev.map(h => h.id === editingId ? { ...h, name, color, price, bonusPrice } : h));
+  const saveEdit = useCallback((name: string, color: HabitColor, price: number, bonusPrice: number, sectionBefore: string) => {
+    setHabits(prev => prev.map(h => h.id === editingId
+      ? { ...h, name, color, price, bonusPrice, sectionBefore: sectionBefore || undefined }
+      : h
+    ));
     setEditingId(null);
   }, [editingId]);
 
@@ -1386,6 +1406,12 @@ export default function App() {
 
             {/* ─ Habit rows (active only) ─ */}
             {visibleHabits.map(habit => (
+              <Fragment key={habit.id}>
+                {habit.sectionBefore && (
+                  <div className="section-divider">
+                    <span className="section-divider-label">{habit.sectionBefore}</span>
+                  </div>
+                )}
               <HabitRow
                 key={habit.id}
                 habit={habit}
@@ -1407,6 +1433,7 @@ export default function App() {
                 onDropRow={reorderHabit}
                 onDragEndRow={handleDragEnd}
               />
+              </Fragment>
             ))}
 
             {/* ─ Footer ─ */}
