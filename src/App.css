@@ -764,17 +764,59 @@ body {
 .section-label-clear:hover { color: #ef4444; }
 
 /* ─── Sync status dot ────────────────────────────────────────────────────── */
-.sync-dot {
-  width: 7px; height: 7px;
-  border-radius: 50%;
-  display: inline-block;
+/* ─── Sync button ─────────────────────────────────────────────────────────── */
+.sync-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; border-radius: 6px;
+  border: 1px solid transparent;
+  background: none; cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
   flex-shrink: 0;
-  transition: background 0.3s;
 }
-.sync-idle    { background: #e2e8f0; }
-.sync-syncing { background: #fbbf24; animation: pulse 1s infinite; }
-.sync-synced  { background: #22c55e; }
-.sync-error   { background: #ef4444; }
+.sync-btn:hover:not(:disabled) { background: #f1f5f9; }
+.sync-btn:disabled { cursor: default; opacity: 0.6; }
+
+.sync-btn-idle    { color: #94a3b8; }
+.sync-btn-syncing { color: #f59e0b; }
+.sync-btn-synced  { color: #16a34a; }
+.sync-btn-error   { color: #ef4444; border-color: #fecaca; background: #fff1f2; }
+.sync-btn-error:hover:not(:disabled) { background: #fee2e2; }
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ─── Sync toast ──────────────────────────────────────────────────────────── */
+.sync-toast {
+  position: fixed;
+  top: 56px; left: 50%; transform: translateX(-50%);
+  z-index: 10000;
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 16px;
+  border-radius: 8px;
+  font-size: 13px; font-weight: 500;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+  max-width: min(480px, calc(100vw - 32px));
+  animation: toast-in 0.2s ease;
+}
+.sync-toast-success {
+  background: #f0fdf4; border: 1px solid #bbf7d0; color: #15803d;
+}
+.sync-toast-error {
+  background: #fff1f2; border: 1px solid #fecdd3; color: #be123c;
+}
+.sync-toast-msg { flex: 1; word-break: break-word; line-height: 1.4; }
+.sync-toast-close {
+  background: none; border: none; cursor: pointer;
+  font-size: 12px; opacity: 0.6; padding: 0 2px; flex-shrink: 0;
+  color: inherit;
+}
+.sync-toast-close:hover { opacity: 1; }
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateX(-50%) translateY(-8px); }
+  to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
 
 @keyframes pulse {
   0%, 100% { opacity: 1; }

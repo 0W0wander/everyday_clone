@@ -1043,7 +1043,15 @@ export default function App() {
   const [draggingId,     setDraggingId]     = useState<string | null>(null);
   const [dragOverId,     setDragOverId]     = useState<string | null>(null);
   const [analyticsView,  setAnalyticsView]  = useState<0 | 1 | 2>(0);
-  const [syncStatus,     setSyncStatus]     = useState<'idle'|'syncing'|'synced'|'error'>('idle');
+  const [syncStatus,  setSyncStatus]  = useState<'idle'|'syncing'|'synced'|'error'>('idle');
+  const [syncToast,   setSyncToast]   = useState<{ type: 'success'|'error'; msg: string } | null>(null);
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const showToast = useCallback((type: 'success'|'error', msg: string) => {
+    setSyncToast({ type, msg });
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setSyncToast(null), 5000);
+  }, []);
   const [showArchive,    setShowArchive]    = useState(false);
   const [commentTarget,  setCommentTarget]  = useState<{ id: string; ds: string; rect: DOMRect } | null>(null);
   const [commentTooltip, setCommentTooltip] = useState<{ text: string; ds: string; rect: DOMRect } | null>(null);
@@ -1069,7 +1077,7 @@ export default function App() {
     setSpent(s => Math.max(0, Math.round((s + amt) * 100) / 100));
   }, []);
 
-  // Persist locally + debounce cloud push
+  // Persist locally + debounce cloud push (silent background — errors shown via dot only)
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(habits));
     if (isFirstLoad.current) return;
@@ -1077,9 +1085,9 @@ export default function App() {
     if (syncTimer.current) clearTimeout(syncTimer.current);
     setSyncStatus('syncing');
     syncTimer.current = setTimeout(() => {
-      pushRemote(habits)
-        .then(() => setSyncStatus('synced'))
-        .catch(() => setSyncStatus('error'));
+      pushRemote(habits).then(result => {
+        setSyncStatus(result.ok ? 'synced' : 'error');
+      });
     }, 1500);
   }, [habits]);
 
@@ -1089,16 +1097,17 @@ export default function App() {
     if (!isSyncConfigured()) return;
     setSyncStatus('syncing');
     fetchRemote<unknown>()
-      .then(remote => {
-        const clean = sanitizeAll(remote);
+      .then(result => {
+        if (!result.ok) { setSyncStatus('error'); return; }
+        const clean = sanitizeAll(result.data);
         if (clean.length > 0) {
           setHabits(clean);
-        } else if (remote !== null) {
-          pushRemote(habitsRef.current).catch(() => {});
+        } else {
+          // Bin exists but has no valid habits — push local to initialise it
+          pushRemote(habitsRef.current);
         }
         setSyncStatus('synced');
       })
-      .catch(() => setSyncStatus('error'))
       .finally(() => { isFirstLoad.current = false; });
   }, []);
 
@@ -1171,6 +1180,31 @@ export default function App() {
     setHabits(prev => prev.map(h => h.id === editingId ? { ...h, archived: true } : h));
     setEditingId(null);
   }, [editingId]);
+
+  // Manual sync: push current habits and pull remote, with toast feedback
+  const syncNow = useCallback(async () => {
+    if (!isSyncConfigured()) {
+      showToast('error', 'Sync not configured — add VITE_GIST_ID and VITE_GITHUB_TOKEN in Vercel settings');
+      return;
+    }
+    setSyncStatus('syncing');
+    // Push first so remote always has our latest
+    const pushResult = await pushRemote(habitsRef.current);
+    if (!pushResult.ok) {
+      setSyncStatus('error');
+      showToast('error', `Push failed: ${pushResult.error}`);
+      return;
+    }
+    // Then pull to confirm round-trip
+    const fetchResult = await fetchRemote<unknown>();
+    if (!fetchResult.ok) {
+      setSyncStatus('error');
+      showToast('error', `Push succeeded but pull failed: ${fetchResult.error}`);
+      return;
+    }
+    setSyncStatus('synced');
+    showToast('success', 'Synced to cloud ✓');
+  }, [showToast]);
 
   const restoreHabit = useCallback((id: string) => {
     setHabits(prev => prev.map(h => h.id === id ? { ...h, archived: false } : h));
@@ -1332,17 +1366,32 @@ export default function App() {
               e.target.value = '';
             }}
           />
-          {isSyncConfigured() && (
-            <span className={`sync-dot sync-${syncStatus}`} title={
-              syncStatus === 'syncing' ? 'Syncing…' :
-              syncStatus === 'synced'  ? 'Saved to cloud' :
-              syncStatus === 'error'   ? 'Sync failed' : ''
-            } />
-          )}
+          <button
+            className={`sync-btn sync-btn-${syncStatus}`}
+            onClick={syncNow}
+            disabled={syncStatus === 'syncing'}
+            title={
+              !isSyncConfigured()       ? 'Sync not configured — click for details' :
+              syncStatus === 'syncing'  ? 'Syncing…' :
+              syncStatus === 'synced'   ? 'Saved to cloud — click to sync now' :
+              syncStatus === 'error'    ? 'Sync error — click to retry' :
+                                         'Click to sync now'
+            }
+          >
+            <SyncIcon spinning={syncStatus === 'syncing'} />
+          </button>
           <MoneyMenu earned={totalMoney} spent={spent} onSpend={spend} />
           {!isMobile && <span className="username">Kevin ▾</span>}
         </div>
       </header>
+
+      {/* ── Sync toast ── */}
+      {syncToast && (
+        <div className={`sync-toast sync-toast-${syncToast.type}`} role="alert">
+          <span className="sync-toast-msg">{syncToast.msg}</span>
+          <button className="sync-toast-close" onClick={() => setSyncToast(null)}>✕</button>
+        </div>
+      )}
 
       {/* ── Daily progress ── */}
       <DailyProgress
@@ -1646,6 +1695,20 @@ function UploadIcon() {
       <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
       <polyline points="17 8 12 3 7 8"/>
       <line x1="12" y1="3" x2="12" y2="15"/>
+    </svg>
+  );
+}
+
+function SyncIcon({ spinning }: { spinning: boolean }) {
+  return (
+    <svg
+      width="14" height="14" viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"
+      style={spinning ? { animation: 'spin 1s linear infinite' } : undefined}
+    >
+      <polyline points="1 4 1 10 7 10"/>
+      <polyline points="23 20 23 14 17 14"/>
+      <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
     </svg>
   );
 }
