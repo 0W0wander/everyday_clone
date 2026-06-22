@@ -1060,6 +1060,7 @@ export default function App() {
   const syncTimer    = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isFirstLoad  = useRef(true);
   const habitsRef    = useRef<Habit[]>(habits);
+  const spentRef     = useRef<number>(spent);
 
   const vw     = useViewportWidth();
   const layout = useMemo(() => getLayout(vw), [vw]);
@@ -1071,7 +1072,7 @@ export default function App() {
   const visibleHabits  = useMemo(() => habits.filter(h => !h.archived), [habits]);
   const archivedHabits = useMemo(() => habits.filter(h =>  h.archived), [habits]);
 
-  useEffect(() => { localStorage.setItem(SPENT_KEY, String(spent)); }, [spent]);
+  useEffect(() => { localStorage.setItem(SPENT_KEY, String(spent)); spentRef.current = spent; }, [spent]);
 
   const spend = useCallback((amt: number) => {
     setSpent(s => Math.max(0, Math.round((s + amt) * 100) / 100));
@@ -1085,13 +1086,26 @@ export default function App() {
     if (syncTimer.current) clearTimeout(syncTimer.current);
     setSyncStatus('syncing');
     syncTimer.current = setTimeout(() => {
-      pushRemote(habits).then(result => {
+      pushRemote({ habits, spent: spentRef.current }).then(result => {
         setSyncStatus(result.ok ? 'synced' : 'error');
       });
     }, 1500);
   }, [habits]);
 
-  useEffect(() => { habitsRef.current = habits; }, [habits]);
+  // Also push when spent changes (debounced separately)
+  const spentSyncTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (isFirstLoad.current) return;
+    if (!isSyncConfigured()) return;
+    if (spentSyncTimer.current) clearTimeout(spentSyncTimer.current);
+    spentSyncTimer.current = setTimeout(() => {
+      pushRemote({ habits: habitsRef.current, spent }).then(result => {
+        setSyncStatus(result.ok ? 'synced' : 'error');
+      });
+    }, 1500);
+  }, [spent]);
+
+  useEffect(() => { habitsRef.current = habits; spentRef.current = spent; }, [habits, spent]);
 
   useEffect(() => {
     if (!isSyncConfigured()) return;
@@ -1099,12 +1113,23 @@ export default function App() {
     fetchRemote<unknown>()
       .then(result => {
         if (!result.ok) { setSyncStatus('error'); return; }
-        const clean = sanitizeAll(result.data);
-        if (clean.length > 0) {
+        // Payload can be either legacy (raw array) or new { habits, spent } shape
+        const raw = result.data;
+        const rawHabits = Array.isArray(raw) ? raw
+          : (raw && typeof raw === 'object' && Array.isArray((raw as { habits?: unknown }).habits))
+            ? (raw as { habits: unknown[] }).habits
+            : null;
+        const remoteSpent = (raw && typeof raw === 'object' && typeof (raw as { spent?: unknown }).spent === 'number')
+          ? (raw as { spent: number }).spent
+          : null;
+
+        if (rawHabits && rawHabits.length > 0) {
+          const clean = sanitizeAll(rawHabits);
           setHabits(clean);
+          if (remoteSpent !== null) setSpent(remoteSpent);
         } else {
-          // Bin exists but has no valid habits — push local to initialise it
-          pushRemote(habitsRef.current);
+          // Nothing valid on remote — push local state to initialise
+          pushRemote({ habits: habitsRef.current, spent: spentRef.current });
         }
         setSyncStatus('synced');
       })
@@ -1189,7 +1214,7 @@ export default function App() {
     }
     setSyncStatus('syncing');
     // Push first so remote always has our latest
-    const pushResult = await pushRemote(habitsRef.current);
+    const pushResult = await pushRemote({ habits: habitsRef.current, spent: spentRef.current });
     if (!pushResult.ok) {
       setSyncStatus('error');
       showToast('error', `Push failed: ${pushResult.error}`);
