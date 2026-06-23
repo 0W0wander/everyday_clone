@@ -199,17 +199,13 @@ function useViewportWidth(): number {
 function streakAt(comp: Set<string>, skip: Set<string>, ds: string): number {
   if (!comp.has(ds) && !skip.has(ds)) return 0;
   let n = comp.has(ds) ? 1 : 0;
-  let consecSkips = skip.has(ds) ? 1 : 0;
   const d = new Date(ds + 'T12:00:00');
   for (;;) {
     d.setDate(d.getDate() - 1);
     const s = fmt(d);
-    if (comp.has(s)) { n++; consecSkips = 0; }
-    else if (skip.has(s)) {
-      consecSkips++;
-      if (consecSkips > 2) break;
-      // skip is transparent — no increment
-    } else break;
+    if (comp.has(s)) { n++; }
+    else if (skip.has(s)) { /* skip is transparent — no increment, no limit */ }
+    else break;
   }
   return n;
 }
@@ -228,7 +224,6 @@ function calcLongestStreak(completions: string[], skips: string[]): number {
   const all = [...new Set([...completions, ...skips])].sort();
   if (!all.length) return 0;
   let max = 0, cur = skipSet.has(all[0]) ? 0 : 1;
-  let consecSkips = skipSet.has(all[0]) ? 1 : 0;
   for (let i = 1; i < all.length; i++) {
     const diff = Math.round(
       (new Date(all[i] + 'T12:00:00').getTime() -
@@ -237,14 +232,10 @@ function calcLongestStreak(completions: string[], skips: string[]): number {
     if (diff !== 1) {
       max = Math.max(max, cur);
       cur = skipSet.has(all[i]) ? 0 : 1;
-      consecSkips = skipSet.has(all[i]) ? 1 : 0;
     } else if (!skipSet.has(all[i])) {
-      consecSkips = 0;
       cur++;
-    } else {
-      consecSkips++;
-      if (consecSkips > 2) { max = Math.max(max, cur); cur = 0; }
     }
+    // skips are transparent — no increment, no break
   }
   return Math.max(max, cur);
 }
@@ -265,20 +256,6 @@ function calcDayStreak(habits: Habit[]): number {
   return streak;
 }
 
-function wouldExceedSkipRun(skips: string[], ds: string, maxRun: number): boolean {
-  const skipSet = new Set(skips);
-  const base = new Date(ds + 'T12:00:00');
-  let run = 1;
-  for (let i = 1; i <= maxRun; i++) {
-    const d = new Date(base); d.setDate(d.getDate() - i);
-    if (skipSet.has(fmt(d))) run++; else break;
-  }
-  for (let i = 1; i <= maxRun; i++) {
-    const d = new Date(base); d.setDate(d.getDate() + i);
-    if (skipSet.has(fmt(d))) run++; else break;
-  }
-  return run > maxRun;
-}
 
 function intensityIdx(s: number): number {
   if (s <= 1) return 0; if (s <= 2) return 1; if (s <= 4) return 2;
@@ -1147,11 +1124,8 @@ export default function App() {
       const dropBonus = (h.bonuses ?? []).filter(b => b !== ds);
       if (!done && !skpd && !fail)
         return { ...h, completions: [...h.completions, ds] };
-      if (done) {
-        if (wouldExceedSkipRun(h.skips, ds, 2))
-          return { ...h, completions: h.completions.filter(c => c !== ds), fails: [...h.fails, ds], bonuses: dropBonus };
+      if (done)
         return { ...h, completions: h.completions.filter(c => c !== ds), skips: [...h.skips, ds], bonuses: dropBonus };
-      }
       if (skpd)
         return { ...h, skips: h.skips.filter(s => s !== ds), fails: [...h.fails, ds] };
       return { ...h, fails: h.fails.filter(f => f !== ds) };
