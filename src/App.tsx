@@ -4,7 +4,7 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import './App.css';
-import type { Habit, HabitColor } from './types';
+import type { Habit, HabitColor, HabitLevel, HabitSchedule } from './types';
 import { fetchRemote, pushRemote, isSyncConfigured } from './sync';
 import { getQuote } from './quotes';
 
@@ -240,17 +240,38 @@ function calcLongestStreak(completions: string[], skips: string[]): number {
   return Math.max(max, cur);
 }
 
-// Consecutive days (ending today, or yesterday if today isn't finished yet)
-// on which EVERY active habit was completed. This is the "perfect day" streak.
+// Consecutive days (ending today, or yesterday if today isn't finished yet) on
+// which every habit DUE that day was completed or skipped. Skips don't break it,
+// and days where nothing is scheduled are neutral (don't break, don't count).
 function calcDayStreak(habits: Habit[]): number {
   if (habits.length === 0) return 0;
-  const sets = habits.map(h => new Set(h.completions));
-  const perfect = (ds: string) => sets.every(s => s.has(ds));
+  const comp = new Map<string, Set<string>>();
+  const skip = new Map<string, Set<string>>();
+  let earliest: string | null = null;
+  for (const h of habits) {
+    comp.set(h.id, new Set(h.completions));
+    skip.set(h.id, new Set(h.skips));
+    for (const ds of [...h.completions, ...h.skips]) {
+      if (earliest === null || ds < earliest) earliest = ds;
+    }
+  }
+  if (earliest === null) return 0;
+
+  // 'ok' = all due done/skipped, 'fail' = something due missed, 'none' = nothing due
+  const dayState = (ds: string): 'ok' | 'fail' | 'none' => {
+    const due = habits.filter(h => isScheduledOn(h, ds));
+    if (due.length === 0) return 'none';
+    return due.every(h => comp.get(h.id)!.has(ds) || skip.get(h.id)!.has(ds)) ? 'ok' : 'fail';
+  };
+
   const d = todayNoon();
-  if (!perfect(fmt(d))) d.setDate(d.getDate() - 1); // grace: today still in progress
+  if (dayState(fmt(d)) === 'fail') d.setDate(d.getDate() - 1); // grace: today in progress
+
   let streak = 0;
-  while (perfect(fmt(d))) {
-    streak++;
+  while (fmt(d) >= earliest) {
+    const st = dayState(fmt(d));
+    if (st === 'fail') break;
+    if (st === 'ok') streak++;
     d.setDate(d.getDate() - 1);
   }
   return streak;
@@ -267,6 +288,91 @@ function cellBg(streak: number, color: string): string {
 }
 
 // ─── Data sanitisation ────────────────────────────────────────────────────────
+
+// Whether a habit has user-defined extra levels (beyond its implicit base level)
+function habitHasLevels(h: Habit): boolean {
+  return (h.levels?.length ?? 0) > 0;
+}
+
+// Is the habit "due" on the given date string (YYYY-MM-DD)?
+function isScheduledOn(h: Habit, ds: string): boolean {
+  const s = h.schedule;
+  if (!s || s.type === 'daily') return true;
+  if (s.type === 'weekly') {
+    if (!s.weekdays.length) return true; // no days picked → treat as daily
+    return s.weekdays.includes(new Date(ds + 'T12:00:00').getDay());
+  }
+  if (s.type === 'interval') {
+    const every = Math.max(1, Math.floor(s.every));
+    const diff = Math.round(
+      (new Date(ds + 'T12:00:00').getTime() - new Date(s.anchor + 'T12:00:00').getTime()) / 86400000
+    );
+    return (((diff % every) + every) % every) === 0;
+  }
+  return true;
+}
+
+// Full selectable level list: the habit itself (base) + any extra levels.
+// Index 0 = base (habit name + per-completion price), 1.. = extra levels.
+function effectiveLevels(h: Habit): HabitLevel[] {
+  return [{ name: h.name, price: h.price ?? DEFAULT_PRICE }, ...(h.levels ?? [])];
+}
+
+// Money earned for a single completed day, honoring levels → bonus → flat price
+function priceForDay(h: Habit, ds: string): number {
+  if (habitHasLevels(h)) {
+    const eff = effectiveLevels(h);
+    const idx = Math.min(h.dayLevels?.[ds] ?? 0, eff.length - 1);
+    return eff[idx].price;
+  }
+  if ((h.bonuses ?? []).includes(ds)) return h.bonusPrice ?? DEFAULT_BONUS_PRICE;
+  return h.price ?? DEFAULT_PRICE;
+}
+
+function sanitizeLevels(raw: unknown): HabitLevel[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out = raw
+    .filter(l => l && typeof l === 'object')
+    .map(l => {
+      const o = l as Partial<HabitLevel>;
+      return {
+        name:  typeof o.name === 'string' && o.name.trim() ? o.name.trim() : 'Level',
+        price: (typeof o.price === 'number' && isFinite(o.price) && o.price >= 0) ? o.price : DEFAULT_PRICE,
+      };
+    });
+  return out.length ? out : undefined;
+}
+
+function sanitizeSchedule(raw: unknown): HabitSchedule | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const s = raw as Partial<HabitSchedule> & { type?: string };
+  if (s.type === 'weekly') {
+    const wd = Array.isArray((s as { weekdays?: unknown }).weekdays)
+      ? ((s as { weekdays: unknown[] }).weekdays).filter(n => typeof n === 'number' && n >= 0 && n <= 6) as number[]
+      : [];
+    return wd.length ? { type: 'weekly', weekdays: [...new Set(wd)] } : undefined;
+  }
+  if (s.type === 'interval') {
+    const every = (s as { every?: unknown }).every;
+    const anchor = (s as { anchor?: unknown }).anchor;
+    if (typeof every === 'number' && every >= 1 && typeof anchor === 'string' && anchor) {
+      return { type: 'interval', every: Math.floor(every), anchor };
+    }
+    return undefined;
+  }
+  return undefined; // 'daily' or unknown → store nothing (= every day)
+}
+
+function sanitizeDayLevels(raw: unknown): Record<string, number> | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const out: Record<string, number> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof k === 'string' && typeof v === 'number' && isFinite(v) && v >= 0) {
+      out[k] = Math.floor(v);
+    }
+  }
+  return Object.keys(out).length ? out : undefined;
+}
 
 function sanitize(h: Partial<Habit>): Habit {
   let color = DEFAULT_COLOR;
@@ -287,7 +393,11 @@ function sanitize(h: Partial<Habit>): Habit {
     bonuses:     Array.isArray(h.bonuses)     ? h.bonuses.filter(d => typeof d === 'string')     : [],
     price:       (typeof h.price === 'number'      && isFinite(h.price)      && h.price      >= 0) ? h.price      : undefined,
     bonusPrice:  (typeof h.bonusPrice === 'number' && isFinite(h.bonusPrice) && h.bonusPrice >= 0) ? h.bonusPrice : undefined,
+    levels:      sanitizeLevels(h.levels),
+    dayLevels:   sanitizeDayLevels(h.dayLevels),
+    activeLevel: (typeof h.activeLevel === 'number' && isFinite(h.activeLevel) && h.activeLevel >= 0) ? Math.floor(h.activeLevel) : undefined,
     sectionBefore: typeof h.sectionBefore === 'string' && h.sectionBefore.trim() ? h.sectionBefore.trim() : undefined,
+    schedule:    sanitizeSchedule(h.schedule),
     isBreak:  !!h.isBreak,
     archived: !!h.archived,
     comments: (h.comments && typeof h.comments === 'object' && !Array.isArray(h.comments))
@@ -491,11 +601,14 @@ function useAnchoredPosition(
 
 interface EditPanelProps {
   habit: Habit;
-  onSave:     (name: string, color: HabitColor, price: number, bonusPrice: number, sectionBefore: string) => void;
+  onSave:     (name: string, color: HabitColor, price: number, bonusPrice: number, sectionBefore: string, levels: HabitLevel[], schedule: HabitSchedule | undefined) => void;
   onCancel:   () => void;
   onDelete:   () => void;
   onArchive:  () => void;
 }
+
+// Draft level row in the editor — price kept as string for free typing
+interface LevelDraft { name: string; price: string; }
 
 function EditPanel({ habit, onSave, onCancel, onDelete, onArchive }: EditPanelProps) {
 
@@ -504,7 +617,31 @@ function EditPanel({ habit, onSave, onCancel, onDelete, onArchive }: EditPanelPr
   const [price,         setPrice]         = useState<string>(String(habit.price      ?? DEFAULT_PRICE));
   const [bonusPrice,    setBonusPrice]    = useState<string>(String(habit.bonusPrice ?? DEFAULT_BONUS_PRICE));
   const [sectionBefore, setSectionBefore] = useState(habit.sectionBefore ?? '');
+  const [levels,        setLevels]        = useState<LevelDraft[]>(
+    (habit.levels ?? []).map(l => ({ name: l.name, price: String(l.price) }))
+  );
+  const [schedType,  setSchedType]  = useState<'daily'|'weekly'|'interval'>(habit.schedule?.type ?? 'daily');
+  const [weekdays,   setWeekdays]   = useState<number[]>(
+    habit.schedule?.type === 'weekly' ? habit.schedule.weekdays : [1, 2, 3, 4, 5]
+  );
+  const [intervalEvery, setIntervalEvery] = useState<string>(
+    habit.schedule?.type === 'interval' ? String(habit.schedule.every) : '2'
+  );
+  const toggleWeekday = (d: number) =>
+    setWeekdays(ws => ws.includes(d) ? ws.filter(x => x !== d) : [...ws, d]);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  const addLevel    = () => setLevels(ls => [...ls, { name: '', price: String(DEFAULT_PRICE) }]);
+  const removeLevel = (idx: number) => setLevels(ls => ls.filter((_, i) => i !== idx));
+  const updateLevel = (idx: number, patch: Partial<LevelDraft>) =>
+    setLevels(ls => ls.map((l, i) => i === idx ? { ...l, ...patch } : l));
+  const moveLevel   = (idx: number, dir: -1 | 1) => setLevels(ls => {
+    const j = idx + dir;
+    if (j < 0 || j >= ls.length) return ls;
+    const next = [...ls];
+    [next[idx], next[j]] = [next[j], next[idx]];
+    return next;
+  });
 
   useEffect(() => { inputRef.current?.focus(); }, []);
 
@@ -533,12 +670,31 @@ function EditPanel({ habit, onSave, onCancel, onDelete, onArchive }: EditPanelPr
     if (!n) return;
     const p  = parseFloat(price);
     const bp = parseFloat(bonusPrice);
+    // Keep only levels with a name; coerce price to a valid number
+    const cleanLevels: HabitLevel[] = levels
+      .filter(l => l.name.trim())
+      .map(l => {
+        const lp = parseFloat(l.price);
+        return { name: l.name.trim(), price: Number.isFinite(lp) && lp >= 0 ? lp : DEFAULT_PRICE };
+      });
+    // Build schedule (undefined = every day)
+    let schedule: HabitSchedule | undefined;
+    if (schedType === 'weekly' && weekdays.length > 0) {
+      schedule = { type: 'weekly', weekdays: [...new Set(weekdays)].sort((a, b) => a - b) };
+    } else if (schedType === 'interval') {
+      const every = Math.max(1, Math.floor(parseFloat(intervalEvery) || 1));
+      // Keep the existing anchor so the cycle doesn't shift; else anchor to today
+      const anchor = habit.schedule?.type === 'interval' ? habit.schedule.anchor : fmt(todayNoon());
+      schedule = { type: 'interval', every, anchor };
+    }
     onSave(
       n,
       color,
       Number.isFinite(p)  && p  >= 0 ? p  : DEFAULT_PRICE,
       Number.isFinite(bp) && bp >= 0 ? bp : DEFAULT_BONUS_PRICE,
       sectionBefore.trim(),
+      cleanLevels,
+      schedule,
     );
   };
 
@@ -599,6 +755,80 @@ function EditPanel({ habit, onSave, onCancel, onDelete, onArchive }: EditPanelPr
           </span>
         </label>
       </div>
+      <div className="levels-editor">
+        <div className="levels-editor-head">
+          <span className="levels-editor-title">Levels</span>
+          <span className="levels-editor-hint">the habit name + “per completion” price is your base level; add bigger versions below</span>
+        </div>
+        {levels.map((lvl, i) => (
+          <div className="level-row" key={i}>
+            <div className="level-move">
+              <button className="level-move-btn" onClick={() => moveLevel(i, -1)} disabled={i === 0} title="Move up">▲</button>
+              <button className="level-move-btn" onClick={() => moveLevel(i, 1)} disabled={i === levels.length - 1} title="Move down">▼</button>
+            </div>
+            <input
+              className="level-name-input"
+              value={lvl.name}
+              onChange={e => updateLevel(i, { name: e.target.value })}
+              onKeyDown={e => { if (e.key === 'Enter') handleSave(); if (e.key === 'Escape') onCancel(); }}
+              placeholder={`Level ${i + 1} name…`}
+            />
+            <span className="level-price-wrap">
+              <span className="price-prefix">$</span>
+              <input
+                type="number" min="0" step="0.05" inputMode="decimal"
+                className="level-price-input"
+                value={lvl.price}
+                onChange={e => updateLevel(i, { price: e.target.value })}
+                onKeyDown={e => { if (e.key === 'Enter') handleSave(); if (e.key === 'Escape') onCancel(); }}
+              />
+            </span>
+            <button className="level-remove" onClick={() => removeLevel(i)} title="Remove level">✕</button>
+          </div>
+        ))}
+        <button className="level-add" onClick={addLevel}>+ Add level</button>
+      </div>
+      <div className="sched-editor">
+        <div className="sched-seg">
+          <button
+            className={`sched-seg-btn${schedType === 'daily' ? ' active' : ''}`}
+            onClick={() => setSchedType('daily')}
+          >Every day</button>
+          <button
+            className={`sched-seg-btn${schedType === 'weekly' ? ' active' : ''}`}
+            onClick={() => setSchedType('weekly')}
+          >Days of week</button>
+          <button
+            className={`sched-seg-btn${schedType === 'interval' ? ' active' : ''}`}
+            onClick={() => setSchedType('interval')}
+          >Every N days</button>
+        </div>
+        {schedType === 'weekly' && (
+          <div className="sched-weekdays">
+            {['S','M','T','W','T','F','S'].map((lbl, d) => (
+              <button
+                key={d}
+                className={`sched-day${weekdays.includes(d) ? ' on' : ''}`}
+                onClick={() => toggleWeekday(d)}
+                title={['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'][d]}
+              >{lbl}</button>
+            ))}
+          </div>
+        )}
+        {schedType === 'interval' && (
+          <div className="sched-interval">
+            <span>Every</span>
+            <input
+              type="number" min="1" step="1" inputMode="numeric"
+              className="sched-interval-input"
+              value={intervalEvery}
+              onChange={e => setIntervalEvery(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') handleSave(); if (e.key === 'Escape') onCancel(); }}
+            />
+            <span>days</span>
+          </div>
+        )}
+      </div>
       <div className="section-label-row">
         <span className="section-label-prefix">§</span>
         <input
@@ -622,6 +852,61 @@ function EditPanel({ habit, onSave, onCancel, onDelete, onArchive }: EditPanelPr
           <TrashIcon />
         </button>
       </div>
+    </div>,
+    document.body,
+  );
+}
+
+// ─── LevelPicker — choose the active level for a habit (portal popover) ───────
+
+interface LevelPickerProps {
+  habit: Habit;
+  onPick:  (level: number) => void;
+  onClose: () => void;
+}
+
+function LevelPicker({ habit, onPick, onClose }: LevelPickerProps) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  const levels = effectiveLevels(habit); // base + extras
+  const active = Math.min(habit.activeLevel ?? 0, Math.max(0, levels.length - 1));
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (panelRef.current && !panelRef.current.contains(e.target as Node)) onClose();
+    };
+    const key = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    const id = setTimeout(() => document.addEventListener('mousedown', handler), 80);
+    document.addEventListener('keydown', key);
+    return () => { clearTimeout(id); document.removeEventListener('mousedown', handler); document.removeEventListener('keydown', key); };
+  }, [onClose]);
+
+  const pos = useAnchoredPosition(
+    () => {
+      const el = document.querySelector(`[data-hid="${CSS.escape(habit.id)}"]`);
+      return el ? (el as HTMLElement).getBoundingClientRect() : null;
+    },
+    panelRef,
+  );
+
+  return createPortal(
+    <div
+      ref={panelRef}
+      className="level-picker"
+      style={{ top: pos?.top ?? 0, left: pos?.left ?? 0, visibility: pos ? 'visible' : 'hidden' }}
+    >
+      <div className="level-picker-head">Active level for <strong>{habit.name}</strong></div>
+      <div className="level-picker-sub">New completions use this level. Middle-click a day for the top level.</div>
+      {levels.map((lvl, i) => (
+        <button
+          key={i}
+          className={`level-picker-item${i === active ? ' active' : ''}`}
+          onClick={() => { onPick(i); onClose(); }}
+        >
+          <span className="level-picker-dot" style={{ background: getPalette(habit.color)[Math.min(2 + i, 7)] }} />
+          <span className="level-picker-name">{lvl.name}</span>
+          <span className="level-picker-price">${lvl.price.toFixed(2)}</span>
+        </button>
+      ))}
     </div>,
     document.body,
   );
@@ -702,6 +987,7 @@ interface RowProps {
   editMode: boolean;
   isEditing: boolean;
   onOpenEdit: () => void;
+  onOpenLevelPicker: (id: string) => void;
   analyticsView: 0 | 1 | 2;
   isDragging: boolean;
   isDragOver: boolean;
@@ -713,7 +999,7 @@ interface RowProps {
 
 const HabitRow = memo(function HabitRow(
   { habit, dates, isCurrentDay, onToggle, onMiddleToggle, onRightClick, onCommentHover, onCommentLeave,
-    editMode, isEditing, onOpenEdit, analyticsView,
+    editMode, isEditing, onOpenEdit, onOpenLevelPicker, analyticsView,
     isDragging, isDragOver, onDragStartRow, onDragOverRow, onDropRow, onDragEndRow }: RowProps
 ) {
   const nameRef = useRef<HTMLDivElement>(null);
@@ -726,6 +1012,12 @@ const HabitRow = memo(function HabitRow(
   const acc  = getAccent(habit.color);
   const doneToday = comp.has(fmt(todayNoon()));   // completed for today?
   const urgeMax   = lon > 0 && cur >= lon && !doneToday; // at record run but today not done yet
+
+  const hasLevels   = habitHasLevels(habit);
+  const levels      = useMemo(() => effectiveLevels(habit), [habit]); // base + extras
+  const dayLevels   = habit.dayLevels ?? {};
+  // Sidebar name is clickable (to pick level) only in non-edit mode with levels defined
+  const nameClickable = hasLevels && !editMode;
 
   const wkCnt  = useMemo(() => countFrom(habit.completions, startOfWeek()),  [habit.completions]);
   const moCnt  = useMemo(() => countFrom(habit.completions, startOfMonth()), [habit.completions]);
@@ -756,7 +1048,17 @@ const HabitRow = memo(function HabitRow(
         onDragEnd={editMode ? () => onDragEndRow() : undefined}
       >
         {editMode && <span className="drag-grip" title="Drag to reorder"><GripIcon /></span>}
-        <span className="habit-name-text">{habit.name}</span>
+        {nameClickable ? (
+          <button
+            className="habit-name-btn"
+            onClick={() => onOpenLevelPicker(habit.id)}
+            title="Click to choose the active level"
+          >
+            <span className="habit-name-text">{habit.name}</span>
+          </button>
+        ) : (
+          <span className="habit-name-text">{habit.name}</span>
+        )}
         {editMode && (
           <button
             className="edit-icon-btn"
@@ -788,10 +1090,19 @@ const HabitRow = memo(function HabitRow(
         const comment = habit.comments?.[ds];
         const hasComment = !!comment;
 
+        // Level indicator: subtle bar only for completions ABOVE the base level,
+        // so base-level days look like normal completions (no mark).
+        const dayLvl = (done && hasLevels) ? Math.min(dayLevels[ds] ?? 0, levels.length - 1) : 0;
+        const showLevelBar = done && hasLevels && dayLvl >= 1;
+        const levelFrac = showLevelBar ? (dayLvl + 1) / levels.length : 0;
+
+        // Off-day: this habit isn't scheduled on this date and nothing's logged.
+        const offDay = !done && !skpd && !faild && !isScheduledOn(habit, ds);
+
         return (
           <div
             key={`${habit.id}-${i}`}
-            className={`cell habit-cell${isTd ? ' today-col' : ''}${faild ? ' failed-cell' : ''}${hasComment ? ' has-comment' : ''}${bns ? ' bonus-cell' : ''}`}
+            className={`cell habit-cell${isTd ? ' today-col' : ''}${faild ? ' failed-cell' : ''}${hasComment ? ' has-comment' : ''}${bns ? ' bonus-cell' : ''}${offDay ? ' off-day' : ''}`}
             style={bns ? undefined : done ? { backgroundColor: bg } : faild ? { '--fail-color': acc } as React.CSSProperties : undefined}
             onClick={() => onToggle(habit.id, ds)}
             onMouseDown={e => { if (e.button === 1) e.preventDefault(); }}
@@ -813,6 +1124,16 @@ const HabitRow = memo(function HabitRow(
             {showRight && <div className="cell-skip cell-skip-right" style={{ background: bg }} />}
             {faild && <div className="cell-fail" />}
             {bns && <span className="cell-money">$</span>}
+            {showLevelBar && (
+              <div
+                className="cell-level-bar"
+                style={{
+                  width: `${levelFrac * 78}%`,
+                  background: getPalette(habit.color)[Math.min(intensityIdx(str) + 3, 7)],
+                }}
+                title={`${levels[dayLvl].name} · $${levels[dayLvl].price.toFixed(2)}`}
+              />
+            )}
             {hasComment && (() => {
               const pal = getPalette(habit.color);
               // On colored cells: dot is 1-2 shades deeper than cell bg.
@@ -869,7 +1190,7 @@ const HabitRow = memo(function HabitRow(
 
 // ─── Daily Progress (gamified) ──────────────────────────────────────────────
 
-interface DayPip { id: string; name: string; color: string; done: boolean; bonus: boolean; price: number; bonusPrice: number; }
+interface DayPip { id: string; name: string; color: string; done: boolean; bonus: boolean; earned: number; }
 
 const DailyProgress = memo(function DailyProgress(
   { pips, done, total, viewingToday, daySeed, earned, dayStreak }: {
@@ -933,7 +1254,7 @@ const DailyProgress = memo(function DailyProgress(
               key={p.id}
               className={`dp-pip${p.done ? ' filled' : ''}${p.bonus ? ' bonus' : ''}`}
               style={p.done && !p.bonus ? { background: p.color, boxShadow: `0 0 0 1px ${p.color}` } : undefined}
-              title={`${p.name}${p.bonus ? ` \u2014 $${p.bonusPrice.toFixed(2)}` : p.done ? ` \u2014 $${p.price.toFixed(2)}` : ` \u2014 $${p.price.toFixed(2)} when done`}`}
+              title={`${p.name}${p.done ? ` \u2014 $${p.earned.toFixed(2)}` : ''}`}
             >
               {p.bonus ? '$' : ''}
             </span>
@@ -1016,7 +1337,9 @@ export default function App() {
   const [adding,         setAdding]         = useState(false);
   const [spent,          setSpent]          = useState<number>(loadSpent);
   const [editMode,       setEditMode]       = useState(false);
+  const [showAllHabits,  setShowAllHabits]  = useState(false);
   const [editingId,      setEditingId]      = useState<string | null>(null);
+  const [levelPickerId,  setLevelPickerId]  = useState<string | null>(null);
   const [draggingId,     setDraggingId]     = useState<string | null>(null);
   const [dragOverId,     setDragOverId]     = useState<string | null>(null);
   const [analyticsView,  setAnalyticsView]  = useState<0 | 1 | 2>(0);
@@ -1114,6 +1437,13 @@ export default function App() {
   }, []);
 
 
+  // Remove a date key from a dayLevels map (returns undefined if it empties out)
+  const dropDayLevel = (dayLevels: Record<string, number> | undefined, ds: string) => {
+    if (!dayLevels || !(ds in dayLevels)) return dayLevels;
+    const { [ds]: _drop, ...rest } = dayLevels;
+    return Object.keys(rest).length ? rest : undefined;
+  };
+
   // Cycle: empty → done → skip → fail → empty
   const toggle = useCallback((id: string, ds: string) => {
     setHabits(prev => prev.map(h => {
@@ -1122,25 +1452,47 @@ export default function App() {
       const skpd = h.skips.includes(ds);
       const fail = h.fails.includes(ds);
       const dropBonus = (h.bonuses ?? []).filter(b => b !== ds);
-      if (!done && !skpd && !fail)
-        return { ...h, completions: [...h.completions, ds] };
+      const hasLevels = habitHasLevels(h);
+      if (!done && !skpd && !fail) {
+        // empty → done: record at the habit's active level (index into effective levels)
+        const dayLevels = hasLevels
+          ? { ...(h.dayLevels ?? {}), [ds]: Math.min(h.activeLevel ?? 0, effectiveLevels(h).length - 1) }
+          : h.dayLevels;
+        return { ...h, completions: [...h.completions, ds], dayLevels };
+      }
       if (done)
-        return { ...h, completions: h.completions.filter(c => c !== ds), skips: [...h.skips, ds], bonuses: dropBonus };
+        return { ...h, completions: h.completions.filter(c => c !== ds), skips: [...h.skips, ds], bonuses: dropBonus, dayLevels: dropDayLevel(h.dayLevels, ds) };
       if (skpd)
         return { ...h, skips: h.skips.filter(s => s !== ds), fails: [...h.fails, ds] };
       return { ...h, fails: h.fails.filter(f => f !== ds) };
     }));
   }, []);
 
-  // Middle-click: toggle a $1 "bonus" completion (done + worth a dollar)
+  // Middle-click: complete at the HIGHEST level (or, if no levels, the legacy $1 bonus)
   const toggleBonus = useCallback((id: string, ds: string) => {
     setHabits(prev => prev.map(h => {
       if (h.id !== id) return h;
+      const hasLevels = habitHasLevels(h);
+
+      if (hasLevels) {
+        const topIdx = effectiveLevels(h).length - 1;
+        const alreadyTop = h.completions.includes(ds) && (h.dayLevels?.[ds] ?? 0) === topIdx;
+        if (alreadyTop)
+          // already at top level → clear back to empty
+          return { ...h, completions: h.completions.filter(c => c !== ds), dayLevels: dropDayLevel(h.dayLevels, ds) };
+        return {
+          ...h,
+          completions: h.completions.includes(ds) ? h.completions : [...h.completions, ds],
+          skips: h.skips.filter(s => s !== ds),
+          fails: h.fails.filter(f => f !== ds),
+          dayLevels: { ...(h.dayLevels ?? {}), [ds]: topIdx },
+        };
+      }
+
+      // Legacy behavior: middle-click toggles a $1 bonus completion
       const bonuses = h.bonuses ?? [];
       if (bonuses.includes(ds))
-        // already a $1 day → clear it back to empty
         return { ...h, completions: h.completions.filter(c => c !== ds), bonuses: bonuses.filter(b => b !== ds) };
-      // mark as a $1 completion regardless of prior state
       return {
         ...h,
         completions: h.completions.includes(ds) ? h.completions : [...h.completions, ds],
@@ -1161,13 +1513,37 @@ export default function App() {
     setAdding(false);
   }, []);
 
-  const saveEdit = useCallback((name: string, color: HabitColor, price: number, bonusPrice: number, sectionBefore: string) => {
-    setHabits(prev => prev.map(h => h.id === editingId
-      ? { ...h, name, color, price, bonusPrice, sectionBefore: sectionBefore || undefined }
-      : h
-    ));
+  const saveEdit = useCallback((name: string, color: HabitColor, price: number, bonusPrice: number, sectionBefore: string, levels: HabitLevel[], schedule: HabitSchedule | undefined) => {
+    setHabits(prev => prev.map(h => {
+      if (h.id !== editingId) return h;
+      const hasLevels = levels.length > 0;
+      const maxIdx = levels.length; // effective levels = base(0) + extras → max index = extras count
+      // Clamp existing per-day levels into the new range (drop entirely if no levels)
+      let dayLevels = h.dayLevels;
+      if (!hasLevels) {
+        dayLevels = undefined;
+      } else if (dayLevels) {
+        dayLevels = Object.fromEntries(
+          Object.entries(dayLevels).map(([k, v]) => [k, Math.min(v, maxIdx)])
+        );
+      }
+      const activeLevel = hasLevels ? Math.min(h.activeLevel ?? 0, maxIdx) : undefined;
+      return {
+        ...h, name, color, price, bonusPrice,
+        sectionBefore: sectionBefore || undefined,
+        levels: hasLevels ? levels : undefined,
+        dayLevels,
+        activeLevel,
+        schedule,
+      };
+    }));
     setEditingId(null);
   }, [editingId]);
+
+  // Set the currently-active level for a habit (used for new completions)
+  const setActiveLevel = useCallback((id: string, level: number) => {
+    setHabits(prev => prev.map(h => h.id === id ? { ...h, activeLevel: level } : h));
+  }, []);
 
   const deleteHabit = useCallback(() => {
     if (!window.confirm('Delete this habit?')) return;
@@ -1242,6 +1618,10 @@ export default function App() {
     setEditingId(id);
   }, []);
 
+  const openLevelPicker = useCallback((id: string) => {
+    setLevelPickerId(id);
+  }, []);
+
   const openComment = useCallback((id: string, ds: string, rect: DOMRect) => {
     setCommentTooltip(null);        // hide tooltip while editing
     setCommentTarget({ id, ds, rect });
@@ -1267,32 +1647,42 @@ export default function App() {
   }, []);
   const hideCommentTooltip = useCallback(() => setCommentTooltip(null), []);
 
-  // Per-habit pricing: `price` per completion, `bonusPrice` for middle-click "bonus" days
-  const totalMoney = useMemo(() => habits.reduce((sum, h) => {
-    const b  = new Set(h.bonuses ?? []);
-    const pr = h.price      ?? DEFAULT_PRICE;
-    const bp = h.bonusPrice ?? DEFAULT_BONUS_PRICE;
-    return sum + h.completions.reduce((s, ds) => s + (b.has(ds) ? bp : pr), 0);
-  }, 0), [habits]);
+  // Per-habit pricing: per-level price when levels exist, else bonus/flat price
+  const totalMoney = useMemo(() => habits.reduce((sum, h) =>
+    sum + h.completions.reduce((s, ds) => s + priceForDay(h, ds), 0),
+  0), [habits]);
   const dailyCount = useCallback((ds: string) =>
     visibleHabits.filter(h => h.completions.includes(ds)).length,
   [visibleHabits]);
 
-  // Today's progress (always real "today", regardless of which day is in view)
+  // Today's progress (always real "today", regardless of which day is in view).
+  // Only habits actually due today count toward the ring / pips.
   const todayStr = fmt(todayNoon());
   const todayPips = useMemo(
-    () => visibleHabits.map(h => ({
-      id: h.id, name: h.name, color: h.color,
-      done: h.completions.includes(todayStr),
-      bonus: (h.bonuses ?? []).includes(todayStr),
-      price:      h.price      ?? DEFAULT_PRICE,
-      bonusPrice: h.bonusPrice ?? DEFAULT_BONUS_PRICE,
-    })),
+    () => visibleHabits.filter(h => isScheduledOn(h, todayStr)).map(h => {
+      const done = h.completions.includes(todayStr);
+      return {
+        id: h.id, name: h.name, color: h.color,
+        done,
+        bonus: (h.bonuses ?? []).includes(todayStr),
+        earned: done ? priceForDay(h, todayStr) : 0,
+      };
+    }),
     [visibleHabits, todayStr],
   );
   const todayDone  = todayPips.filter(p => p.done).length;
-  const todayMoney = todayPips.reduce((s, p) => s + (p.done ? (p.bonus ? p.bonusPrice : p.price) : 0), 0);
+  const todayMoney = todayPips.reduce((s, p) => s + p.earned, 0);
   const dayStreak  = useMemo(() => calcDayStreak(visibleHabits), [visibleHabits]);
+
+  // Rows to render: in edit mode or with the eyeball on, show every habit;
+  // otherwise show only habits due today.
+  const shownHabits = useMemo(
+    () => (editMode || showAllHabits)
+      ? visibleHabits
+      : visibleHabits.filter(h => isScheduledOn(h, todayStr)),
+    [visibleHabits, editMode, showAllHabits, todayStr],
+  );
+  const hiddenCount = visibleHabits.length - shownHabits.length;
   // Stable per-day seed so "start"/"victory" quotes vary day to day.
   const daySeed = useMemo(() => {
     const d = todayNoon();
@@ -1334,54 +1724,68 @@ export default function App() {
   }, []);
 
   const editingHabit = editingId ? visibleHabits.find(h => h.id === editingId) : null;
+  const levelPickerHabit = levelPickerId ? visibleHabits.find(h => h.id === levelPickerId) : null;
 
   return (
     <div className={`app${isMobile ? ' mobile' : ''}`} style={{ '--row-h': `${rowH}px` } as React.CSSProperties}>
-      {/* ── App bar ── */}
-      <header className="appbar">
-        <div className="logo">
-          <LogoMark />
-          <span className="logo-text">everyday</span>
+      {/* ── Unified header (toolbar + daily progress) ── */}
+      <header className={`app-header${todayDone > 0 && todayDone === todayPips.length && todayPips.length > 0 ? ' is-complete' : ''}`}>
+        <div className="app-header-top">
+          <div className="logo">
+            <LogoMark />
+            <span className="logo-text">everyday</span>
+          </div>
+          <div className="app-header-tools">
+            <div className="nav-group">
+              <button className="nav-btn" onClick={() => setOffset(o => o + 1)}>‹</button>
+              <button className="nav-btn" onClick={() => setOffset(o => Math.max(0, o - 1))} disabled={offset === 0}>›</button>
+            </div>
+            <div className="user-bar">
+              <button className="data-btn" onClick={exportData} title="Export your habits">
+                <DownloadIcon />
+              </button>
+              <button className="data-btn" onClick={() => fileInputRef.current?.click()} title="Import habits from file">
+                <UploadIcon />
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="application/json"
+                style={{ display: 'none' }}
+                onChange={e => {
+                  const f = e.target.files?.[0];
+                  if (f) importData(f);
+                  e.target.value = '';
+                }}
+              />
+              <button
+                className={`sync-btn sync-btn-${syncStatus}`}
+                onClick={syncNow}
+                disabled={syncStatus === 'syncing'}
+                title={
+                  !isSyncConfigured()       ? 'Sync not configured — click for details' :
+                  syncStatus === 'syncing'  ? 'Syncing…' :
+                  syncStatus === 'synced'   ? 'Saved to cloud — click to sync now' :
+                  syncStatus === 'error'    ? 'Sync error — click to retry' :
+                                             'Click to sync now'
+                }
+              >
+                <SyncIcon spinning={syncStatus === 'syncing'} />
+              </button>
+              <MoneyMenu earned={totalMoney} spent={spent} onSpend={spend} />
+              {!isMobile && <span className="username">Kevin ▾</span>}
+            </div>
+          </div>
         </div>
-        <div className="nav-group">
-          <button className="nav-btn" onClick={() => setOffset(o => o + 1)}>‹</button>
-          <button className="nav-btn" onClick={() => setOffset(o => Math.max(0, o - 1))} disabled={offset === 0}>›</button>
-        </div>
-        <div className="user-bar">
-          <button className="data-btn" onClick={exportData} title="Export your habits">
-            <DownloadIcon />
-          </button>
-          <button className="data-btn" onClick={() => fileInputRef.current?.click()} title="Import habits from file">
-            <UploadIcon />
-          </button>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="application/json"
-            style={{ display: 'none' }}
-            onChange={e => {
-              const f = e.target.files?.[0];
-              if (f) importData(f);
-              e.target.value = '';
-            }}
-          />
-          <button
-            className={`sync-btn sync-btn-${syncStatus}`}
-            onClick={syncNow}
-            disabled={syncStatus === 'syncing'}
-            title={
-              !isSyncConfigured()       ? 'Sync not configured — click for details' :
-              syncStatus === 'syncing'  ? 'Syncing…' :
-              syncStatus === 'synced'   ? 'Saved to cloud — click to sync now' :
-              syncStatus === 'error'    ? 'Sync error — click to retry' :
-                                         'Click to sync now'
-            }
-          >
-            <SyncIcon spinning={syncStatus === 'syncing'} />
-          </button>
-          <MoneyMenu earned={totalMoney} spent={spent} onSpend={spend} />
-          {!isMobile && <span className="username">Kevin ▾</span>}
-        </div>
+        <DailyProgress
+          pips={todayPips}
+          done={todayDone}
+          total={todayPips.length}
+          viewingToday={isCurrentDay}
+          daySeed={daySeed}
+          earned={todayMoney}
+          dayStreak={dayStreak}
+        />
       </header>
 
       {/* ── Sync toast ── */}
@@ -1391,17 +1795,6 @@ export default function App() {
           <button className="sync-toast-close" onClick={() => setSyncToast(null)}>✕</button>
         </div>
       )}
-
-      {/* ── Daily progress ── */}
-      <DailyProgress
-        pips={todayPips}
-        done={todayDone}
-        total={todayPips.length}
-        viewingToday={isCurrentDay}
-        daySeed={daySeed}
-        earned={todayMoney}
-        dayStreak={dayStreak}
-      />
 
       {/* ── Board ── */}
       <div className="board-scroll">
@@ -1422,6 +1815,19 @@ export default function App() {
                     <span>{archivedHabits.length}</span>
                   </button>
                 )}
+                <button
+                  className={`eye-btn${showAllHabits ? ' active' : ''}`}
+                  onClick={() => setShowAllHabits(v => !v)}
+                  disabled={editMode}
+                  title={
+                    editMode ? 'All habits shown while editing'
+                    : showAllHabits ? 'Showing all habits — click to show only today’s'
+                    : hiddenCount > 0 ? `Showing today’s habits (${hiddenCount} hidden) — click to show all`
+                    : 'Showing all habits'
+                  }
+                >
+                  {showAllHabits || editMode ? <EyeIcon /> : <EyeOffIcon />}
+                </button>
                 <button
                   className={`edit-mode-btn${editMode ? ' active' : ''}`}
                   onClick={() => { setEditMode(m => !m); cancelEdit(); }}
@@ -1453,7 +1859,7 @@ export default function App() {
             ))}
 
             {/* ─ Habit rows (active only) ─ */}
-            {visibleHabits.map(habit => (
+            {shownHabits.map(habit => (
               <Fragment key={habit.id}>
                 {habit.sectionBefore && (
                   <div className="section-divider">
@@ -1473,6 +1879,7 @@ export default function App() {
                 editMode={editMode}
                 isEditing={editingId === habit.id}
                 onOpenEdit={() => openEdit(habit.id)}
+                onOpenLevelPicker={openLevelPicker}
                 analyticsView={analyticsView}
                 isDragging={draggingId === habit.id}
                 isDragOver={dragOverId === habit.id && draggingId !== habit.id}
@@ -1532,6 +1939,15 @@ export default function App() {
           onCancel={cancelEdit}
           onDelete={deleteHabit}
           onArchive={archiveHabit}
+        />
+      )}
+
+      {/* ── Level Picker ── */}
+      {levelPickerHabit && (
+        <LevelPicker
+          habit={levelPickerHabit}
+          onPick={lvl => setActiveLevel(levelPickerHabit.id, lvl)}
+          onClose={() => setLevelPickerId(null)}
         />
       )}
 
@@ -1674,6 +2090,24 @@ function GripIcon() {
       <circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/>
       <circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/>
       <circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/>
+    </svg>
+  );
+}
+function EyeIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/>
+      <circle cx="12" cy="12" r="3"/>
+    </svg>
+  );
+}
+function EyeOffIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-7-11-7a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 7 11 7a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/>
+      <line x1="1" y1="1" x2="23" y2="23"/>
     </svg>
   );
 }

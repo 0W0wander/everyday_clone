@@ -10,21 +10,36 @@ body {
 /* ─── App shell ──────────────────────────────────────────────────────────── */
 .app { display: flex; flex-direction: column; min-height: 100vh; }
 
-/* ─── App bar ────────────────────────────────────────────────────────────── */
-.appbar {
+/* ─── Unified header (toolbar + daily progress) ─────────────────────────── */
+.app-header {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 24px 14px;
+  background: linear-gradient(135deg, #f0fdf4 0%, #ffffff 55%);
+  border-bottom: 1px solid #e2e8f0;
+}
+.app-header.is-complete {
+  background: linear-gradient(135deg, #dcfce7 0%, #f0fdf4 65%);
+}
+.app-header-top {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 12px;
-  padding: 0 32px;
-  height: 52px;
-  background: #fff;
-  border-bottom: 1px solid #e2e8f0;
+  min-height: 36px;
+}
+.app-header-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   flex-shrink: 0;
 }
-.logo { display: flex; align-items: center; gap: 10px; }
+.logo { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
 .logo-text { font-size: 18px; font-weight: 700; color: #0f172a; letter-spacing: -0.4px; }
 
-.nav-group { display: flex; gap: 4px; margin-left: auto; }
+.nav-group { display: flex; gap: 4px; }
 .nav-btn {
   background: none;
   border: 1px solid #e2e8f0;
@@ -43,7 +58,7 @@ body {
 .nav-btn:hover:not(:disabled) { background: #f1f5f9; color: #0f172a; }
 .nav-btn:disabled { opacity: 0.3; cursor: default; }
 
-.user-bar { display: flex; align-items: center; gap: 6px; font-size: 14px; margin-left: 10px; }
+.user-bar { display: flex; align-items: center; gap: 6px; font-size: 14px; }
 .score { font-weight: 700; color: #16a34a; font-size: 15px; }
 .money-score { font-variant-numeric: tabular-nums; letter-spacing: -0.2px; cursor: default; }
 .money-score.negative { color: #ef4444; }
@@ -117,19 +132,16 @@ body {
 .username { color: #64748b; cursor: pointer; }
 .username:hover { color: #0f172a; }
 
-/* ─── Daily progress (gamified) ──────────────────────────────────────────── */
+/* ─── Daily progress (inside unified header) ─────────────────────────────── */
 .daily-progress {
-  flex-shrink: 0;
   display: flex;
   align-items: center;
-  gap: 18px;
-  padding: 14px 32px;
-  background: linear-gradient(135deg, #f0fdf4 0%, #ffffff 60%);
-  border-bottom: 1px solid #e2e8f0;
+  gap: 16px;
+  padding: 0;
+  background: transparent;
+  border-bottom: none;
 }
-.daily-progress.is-complete {
-  background: linear-gradient(135deg, #dcfce7 0%, #f0fdf4 70%);
-}
+.app-header.is-complete .daily-progress { background: transparent; }
 
 /* Ring */
 .dp-ring { position: relative; width: 74px; height: 74px; flex-shrink: 0; }
@@ -142,6 +154,7 @@ body {
   transition: stroke-dasharray 0.5s cubic-bezier(0.22, 1, 0.36, 1);
 }
 .daily-progress.is-complete .dp-ring-fill { stroke: #15803d; }
+.app-header.is-complete .dp-ring-fill { stroke: #15803d; }
 .dp-ring-label {
   position: absolute;
   inset: 0;
@@ -225,6 +238,7 @@ body {
   padding: 1px 9px;
 }
 .daily-progress.is-complete .dp-earned { background: #dcfce7; border-color: #86efac; }
+.app-header.is-complete .dp-earned { background: #dcfce7; border-color: #86efac; }
 
 .dp-quote { display: flex; flex-direction: column; gap: 1px; max-width: 560px; }
 .dp-quote-text {
@@ -241,9 +255,19 @@ body {
 }
 .daily-progress.is-complete .dp-quote-text { color: #15803d; font-weight: 500; }
 .daily-progress.is-complete .dp-quote-source { color: #16a34a; }
+.app-header.is-complete .dp-quote-text { color: #15803d; font-weight: 500; }
+.app-header.is-complete .dp-quote-source { color: #16a34a; }
 
 @media (max-width: 639px) {
-  .daily-progress { padding: 10px 12px; gap: 12px; }
+  .app-header { padding: 8px 12px 12px; gap: 8px; }
+  .app-header-top { min-height: 32px; }
+  .logo-text { font-size: 16px; }
+  .nav-btn   { width: 28px; height: 26px; font-size: 18px; }
+  .data-btn  { width: 28px; height: 28px; }
+  .data-btn svg { width: 12px; height: 12px; }
+  .user-bar { gap: 4px; }
+  .score    { font-size: 13px; }
+  .daily-progress { gap: 12px; }
   .dp-ring, .dp-ring svg { width: 58px; height: 58px; }
   .dp-pct { font-size: 15px; }
   .dp-check { font-size: 22px; }
@@ -397,6 +421,15 @@ body {
 .habit-name:hover { background: #f8fafc; }
 .habit-name.editing { background: #f0f9ff; z-index: 10; }
 
+/* Clickable habit name (non-edit mode, levels defined) → opens level picker.
+   Looks identical to a normal habit name — no extra marks. */
+.habit-name-btn {
+  flex: 1; min-width: 0;
+  display: flex; align-items: center;
+  background: none; border: none; padding: 0; margin: 0;
+  cursor: pointer; text-align: left; font: inherit;
+}
+
 .habit-name-text {
   font-size: 13px; font-weight: 500; color: #1e293b;
   flex: 1; user-select: none;
@@ -479,6 +512,19 @@ body {
 }
 .cell-fail::before { transform: rotate(45deg); }
 .cell-fail::after  { transform: rotate(-45deg); }
+
+/* Level indicator: subtle bar centered at the bottom of a completed cell.
+   Wider bar = higher level. */
+.cell-level-bar {
+  position: absolute;
+  bottom: 2px;
+  left: 50%;
+  transform: translateX(-50%);
+  height: 3px;
+  border-radius: 2px;
+  opacity: 0.9;
+  pointer-events: none;
+}
 
 /* Today column: subtle tint only, no side borders */
 .habit-cell.today-col {
@@ -740,6 +786,145 @@ body {
 .edit-panel-actions {
   display: flex; gap: 6px; align-items: center;
 }
+
+/* ─── Levels editor (inside EditPanel) ───────────────────────────────────── */
+.levels-editor {
+  display: flex; flex-direction: column; gap: 6px;
+  border: 1px solid #e2e8f0; border-radius: 8px;
+  padding: 8px; background: #f8fafc;
+}
+.levels-editor-head { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
+.levels-editor-title {
+  font-size: 11px; font-weight: 700; color: #475569;
+  text-transform: uppercase; letter-spacing: 0.03em;
+}
+.levels-editor-hint { font-size: 10px; color: #94a3b8; }
+.level-row { display: flex; align-items: center; gap: 5px; }
+.level-move { display: flex; flex-direction: column; gap: 1px; }
+.level-move-btn {
+  background: none; border: none; cursor: pointer; color: #94a3b8;
+  font-size: 7px; line-height: 1; padding: 1px 2px;
+}
+.level-move-btn:disabled { opacity: 0.3; cursor: default; }
+.level-move-btn:hover:not(:disabled) { color: #475569; }
+.level-name-input {
+  flex: 1; min-width: 0;
+  border: 1px solid #e2e8f0; border-radius: 6px;
+  padding: 6px 8px; font-size: 13px; font-family: inherit; font-weight: 500;
+  color: #0f172a; outline: none; background: #fff;
+}
+.level-name-input:focus { border-color: #2563eb; }
+.level-price-wrap {
+  display: flex; align-items: center; gap: 2px;
+  border: 1px solid #e2e8f0; border-radius: 6px;
+  padding: 0 6px; background: #fff; width: 74px; flex-shrink: 0;
+}
+.level-price-wrap:focus-within { border-color: #16a34a; }
+.level-price-input {
+  width: 100%; min-width: 0; border: none; outline: none;
+  padding: 6px 2px; font-size: 13px; font-family: inherit; font-weight: 600;
+  color: #0f172a; background: transparent;
+}
+.level-remove {
+  background: none; border: none; cursor: pointer; flex-shrink: 0;
+  color: #cbd5e1; font-size: 12px; padding: 2px 4px; line-height: 1;
+}
+.level-remove:hover { color: #ef4444; }
+.level-add {
+  align-self: flex-start;
+  background: none; border: 1px dashed #cbd5e1; border-radius: 6px;
+  color: #64748b; cursor: pointer;
+  font-size: 12px; font-weight: 600; padding: 5px 10px;
+  transition: border-color 0.1s, color 0.1s;
+}
+.level-add:hover { border-color: #2563eb; color: #2563eb; }
+
+/* ─── Schedule editor ─────────────────────────────────────────────────────── */
+.sched-editor {
+  display: flex; flex-direction: column; gap: 8px;
+  border: 1px solid #e2e8f0; border-radius: 8px;
+  padding: 8px; background: #f8fafc;
+}
+.sched-seg { display: flex; gap: 4px; }
+.sched-seg-btn {
+  flex: 1; background: #fff; border: 1px solid #e2e8f0; border-radius: 6px;
+  color: #64748b; cursor: pointer; padding: 5px 4px;
+  font-size: 11px; font-weight: 600; line-height: 1.1;
+  transition: border-color 0.1s, color 0.1s, background 0.1s;
+}
+.sched-seg-btn:hover { border-color: #cbd5e1; color: #475569; }
+.sched-seg-btn.active { background: #eff6ff; color: #2563eb; border-color: #bfdbfe; }
+.sched-weekdays { display: flex; gap: 4px; justify-content: space-between; }
+.sched-day {
+  width: 30px; height: 30px; border-radius: 50%;
+  background: #fff; border: 1px solid #e2e8f0;
+  color: #94a3b8; cursor: pointer;
+  font-size: 12px; font-weight: 700;
+  display: flex; align-items: center; justify-content: center;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+}
+.sched-day:hover { border-color: #cbd5e1; }
+.sched-day.on { background: #2563eb; color: #fff; border-color: #2563eb; }
+.sched-interval { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #475569; }
+.sched-interval-input {
+  width: 56px; border: 1px solid #e2e8f0; border-radius: 6px;
+  padding: 5px 8px; font-size: 13px; outline: none; text-align: center;
+}
+.sched-interval-input:focus { border-color: #2563eb; }
+
+/* ─── Eyeball (show all / today's) toggle ─────────────────────────────────── */
+.eye-btn {
+  background: none;
+  border: 1px solid #e2e8f0;
+  border-radius: 5px;
+  cursor: pointer;
+  color: #94a3b8;
+  width: 26px; height: 22px;
+  display: flex; align-items: center; justify-content: center;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+  flex-shrink: 0;
+}
+.eye-btn:hover:not(:disabled) { background: #f1f5f9; color: #475569; border-color: #cbd5e1; }
+.eye-btn.active { background: #eff6ff; color: #2563eb; border-color: #bfdbfe; }
+.eye-btn:disabled { opacity: 0.4; cursor: default; }
+
+/* ─── Off-day cells (habit not scheduled, nothing logged) ─────────────────── */
+.habit-cell.off-day {
+  background-image:
+    repeating-linear-gradient(135deg,
+      rgba(148, 163, 184, 0.10) 0,
+      rgba(148, 163, 184, 0.10) 1px,
+      transparent 1px,
+      transparent 6px);
+  cursor: pointer;
+}
+
+/* ─── Level picker popover ────────────────────────────────────────────────── */
+.level-picker {
+  position: absolute;
+  z-index: 9999;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 8px;
+  min-width: 220px;
+  display: flex; flex-direction: column; gap: 2px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.12), 0 2px 6px rgba(0,0,0,0.06);
+}
+.level-picker-head { font-size: 12px; color: #334155; padding: 2px 6px; }
+.level-picker-sub { font-size: 10px; color: #94a3b8; padding: 0 6px 6px; line-height: 1.3; }
+.level-picker-item {
+  display: flex; align-items: center; gap: 8px;
+  background: none; border: none; cursor: pointer;
+  padding: 7px 8px; border-radius: 6px; text-align: left; font: inherit;
+  transition: background 0.1s;
+}
+.level-picker-item:hover { background: #f1f5f9; }
+.level-picker-item.active { background: #eff6ff; }
+.level-picker-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+.level-picker-name { flex: 1; font-size: 13px; font-weight: 500; color: #1e293b; }
+.level-picker-item.active .level-picker-name { color: #1d4ed8; font-weight: 600; }
+.level-picker-price { font-size: 12px; font-weight: 600; color: #64748b; }
 
 /* Section label field inside EditPanel */
 .section-label-row {
@@ -1078,24 +1263,12 @@ body {
 
 /* ─── Mobile (< 640px) ──────────────────────────────────────────────────── */
 @media (max-width: 639px) {
-  .appbar {
-    padding: 0 12px;
-    height: 48px;
-    gap: 6px;
-  }
-  .logo-text { font-size: 16px; }
-  .nav-btn   { width: 28px; height: 26px; font-size: 18px; }
-  .data-btn  { width: 28px; height: 28px; }
-  .data-btn svg { width: 12px; height: 12px; }
-  .user-bar { gap: 4px; margin-left: 4px; }
-  .score    { font-size: 13px; }
-
   .board-scroll { padding: 12px 8px 16px; }
   .board-center { border-radius: 8px; }
 
   .habits-header { padding: 6px 6px 6px 10px; }
   .habits-label  { font-size: 9px; letter-spacing: 0.08em; }
-  .edit-mode-btn { width: 24px; height: 22px; }
+  .edit-mode-btn, .eye-btn { width: 24px; height: 22px; }
 
   .habit-name {
     padding: 0 4px 0 10px;
