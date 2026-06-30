@@ -1018,6 +1018,8 @@ const HabitRow = memo(function HabitRow(
   const dayLevels   = habit.dayLevels ?? {};
   // Sidebar name is clickable (to pick level) only in non-edit mode with levels defined
   const nameClickable = hasLevels && !editMode;
+  const activeLevelIdx = Math.min(habit.activeLevel ?? 0, Math.max(0, levels.length - 1));
+  const displayName = nameClickable ? levels[activeLevelIdx].name : habit.name;
 
   const wkCnt  = useMemo(() => countFrom(habit.completions, startOfWeek()),  [habit.completions]);
   const moCnt  = useMemo(() => countFrom(habit.completions, startOfMonth()), [habit.completions]);
@@ -1052,12 +1054,12 @@ const HabitRow = memo(function HabitRow(
           <button
             className="habit-name-btn"
             onClick={() => onOpenLevelPicker(habit.id)}
-            title="Click to choose the active level"
+            title={`${displayName} — click to change level`}
           >
-            <span className="habit-name-text">{habit.name}</span>
+            <span className="habit-name-text">{displayName}</span>
           </button>
         ) : (
-          <span className="habit-name-text">{habit.name}</span>
+          <span className="habit-name-text">{displayName}</span>
         )}
         {editMode && (
           <button
