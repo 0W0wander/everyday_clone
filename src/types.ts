@@ -4,7 +4,7 @@ export type HabitColor = string; // hex color, e.g. "#4ade80"
 export type HabitSchedule =
   | { type: 'daily' }
   | { type: 'weekly'; weekdays: number[] }           // 0=Sun … 6=Sat
-  | { type: 'interval'; every: number; anchor: string }; // every N days from anchor (YYYY-MM-DD)
+  | { type: 'interval'; every: number }; // hide for N days after each completion
 
 // An optional intensity tier for a habit, e.g. "Go to gym" / "30 min" / "1 hour".
 // Ordered smallest → largest. Each carries its own payout.

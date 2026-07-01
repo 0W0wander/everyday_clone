@@ -175,6 +175,20 @@ function todayNoon(): Date {
 }
 function fmt(d: Date): string { return d.toISOString().split('T')[0]; }
 
+function daysBetween(from: string, to: string): number {
+  return Math.round(
+    (new Date(to + 'T12:00:00').getTime() - new Date(from + 'T12:00:00').getTime()) / 86400000
+  );
+}
+
+function lastCompletionOnOrBefore(h: Habit, ds: string): string | null {
+  let last: string | null = null;
+  for (const c of h.completions) {
+    if (c <= ds && (last === null || c > last)) last = c;
+  }
+  return last;
+}
+
 function getVisibleDates(offset: number, daysBack: number): Date[] {
   const base = todayNoon();
   return Array.from({ length: daysBack + 1 }, (_, i) => {
@@ -304,10 +318,10 @@ function isScheduledOn(h: Habit, ds: string): boolean {
   }
   if (s.type === 'interval') {
     const every = Math.max(1, Math.floor(s.every));
-    const diff = Math.round(
-      (new Date(ds + 'T12:00:00').getTime() - new Date(s.anchor + 'T12:00:00').getTime()) / 86400000
-    );
-    return (((diff % every) + every) % every) === 0;
+    const lastComp = lastCompletionOnOrBefore(h, ds);
+    if (!lastComp) return true; // never completed → always due
+    if (lastComp === ds) return true; // stay visible on the day you complete it
+    return daysBetween(lastComp, ds) >= every;
   }
   return true;
 }
@@ -354,9 +368,8 @@ function sanitizeSchedule(raw: unknown): HabitSchedule | undefined {
   }
   if (s.type === 'interval') {
     const every = (s as { every?: unknown }).every;
-    const anchor = (s as { anchor?: unknown }).anchor;
-    if (typeof every === 'number' && every >= 1 && typeof anchor === 'string' && anchor) {
-      return { type: 'interval', every: Math.floor(every), anchor };
+    if (typeof every === 'number' && every >= 1) {
+      return { type: 'interval', every: Math.floor(every) };
     }
     return undefined;
   }
@@ -683,9 +696,7 @@ function EditPanel({ habit, onSave, onCancel, onDelete, onArchive }: EditPanelPr
       schedule = { type: 'weekly', weekdays: [...new Set(weekdays)].sort((a, b) => a - b) };
     } else if (schedType === 'interval') {
       const every = Math.max(1, Math.floor(parseFloat(intervalEvery) || 1));
-      // Keep the existing anchor so the cycle doesn't shift; else anchor to today
-      const anchor = habit.schedule?.type === 'interval' ? habit.schedule.anchor : fmt(todayNoon());
-      schedule = { type: 'interval', every, anchor };
+      schedule = { type: 'interval', every };
     }
     onSave(
       n,
@@ -801,7 +812,7 @@ function EditPanel({ habit, onSave, onCancel, onDelete, onArchive }: EditPanelPr
           <button
             className={`sched-seg-btn${schedType === 'interval' ? ' active' : ''}`}
             onClick={() => setSchedType('interval')}
-          >Every N days</button>
+          >Cooldown</button>
         </div>
         {schedType === 'weekly' && (
           <div className="sched-weekdays">
@@ -817,7 +828,7 @@ function EditPanel({ habit, onSave, onCancel, onDelete, onArchive }: EditPanelPr
         )}
         {schedType === 'interval' && (
           <div className="sched-interval">
-            <span>Every</span>
+            <span>Hide for</span>
             <input
               type="number" min="1" step="1" inputMode="numeric"
               className="sched-interval-input"
@@ -825,7 +836,7 @@ function EditPanel({ habit, onSave, onCancel, onDelete, onArchive }: EditPanelPr
               onChange={e => setIntervalEvery(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter') handleSave(); if (e.key === 'Escape') onCancel(); }}
             />
-            <span>days</span>
+            <span>days after completing</span>
           </div>
         )}
       </div>
@@ -1019,7 +1030,7 @@ const HabitRow = memo(function HabitRow(
   // Sidebar name is clickable (to pick level) only in non-edit mode with levels defined
   const nameClickable = hasLevels && !editMode;
   const activeLevelIdx = Math.min(habit.activeLevel ?? 0, Math.max(0, levels.length - 1));
-  const displayName = nameClickable ? levels[activeLevelIdx].name : habit.name;
+  const displayName = hasLevels ? levels[activeLevelIdx].name : habit.name;
 
   const wkCnt  = useMemo(() => countFrom(habit.completions, startOfWeek()),  [habit.completions]);
   const moCnt  = useMemo(() => countFrom(habit.completions, startOfMonth()), [habit.completions]);
