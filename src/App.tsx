@@ -1206,9 +1206,9 @@ const HabitRow = memo(function HabitRow(
 interface DayPip { id: string; name: string; color: string; done: boolean; bonus: boolean; earned: number; }
 
 const DailyProgress = memo(function DailyProgress(
-  { pips, done, total, viewingToday, daySeed, earned, dayStreak }: {
+  { pips, done, total, viewingToday, daySeed, earned, dayStreak, tools }: {
     pips: DayPip[]; done: number; total: number; viewingToday: boolean;
-    daySeed: number; earned: number; dayStreak: number;
+    daySeed: number; earned: number; dayStreak: number; tools?: React.ReactNode;
   }
 ) {
   const remaining = total - done;
@@ -1275,9 +1275,12 @@ const DailyProgress = memo(function DailyProgress(
           {total === 0 && <span className="dp-pip-empty">No habits yet</span>}
         </div>
 
-        <div className="dp-quote">
-          <span className="dp-quote-text">{quote.text}</span>
-          <span className="dp-quote-source">{'\u2014 '}{quote.source}</span>
+        <div className="dp-bottom">
+          <div className="dp-quote">
+            <span className="dp-quote-text">{quote.text}</span>
+            <span className="dp-quote-source">{'\u2014 '}{quote.source}</span>
+          </div>
+          {tools}
         </div>
       </div>
     </section>
@@ -1743,53 +1746,6 @@ export default function App() {
     <div className={`app${isMobile ? ' mobile' : ''}`} style={{ '--row-h': `${rowH}px` } as React.CSSProperties}>
       {/* ── Unified header (toolbar + daily progress) ── */}
       <header className={`app-header${todayDone > 0 && todayDone === todayPips.length && todayPips.length > 0 ? ' is-complete' : ''}`}>
-        <div className="app-header-top">
-          <div className="logo">
-            <LogoMark />
-            <span className="logo-text">everyday</span>
-          </div>
-          <div className="app-header-tools">
-            <div className="nav-group">
-              <button className="nav-btn" onClick={() => setOffset(o => o + 1)}>‹</button>
-              <button className="nav-btn" onClick={() => setOffset(o => Math.max(0, o - 1))} disabled={offset === 0}>›</button>
-            </div>
-            <div className="user-bar">
-              <button className="data-btn" onClick={exportData} title="Export your habits">
-                <DownloadIcon />
-              </button>
-              <button className="data-btn" onClick={() => fileInputRef.current?.click()} title="Import habits from file">
-                <UploadIcon />
-              </button>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="application/json"
-                style={{ display: 'none' }}
-                onChange={e => {
-                  const f = e.target.files?.[0];
-                  if (f) importData(f);
-                  e.target.value = '';
-                }}
-              />
-              <button
-                className={`sync-btn sync-btn-${syncStatus}`}
-                onClick={syncNow}
-                disabled={syncStatus === 'syncing'}
-                title={
-                  !isSyncConfigured()       ? 'Sync not configured — click for details' :
-                  syncStatus === 'syncing'  ? 'Syncing…' :
-                  syncStatus === 'synced'   ? 'Saved to cloud — click to sync now' :
-                  syncStatus === 'error'    ? 'Sync error — click to retry' :
-                                             'Click to sync now'
-                }
-              >
-                <SyncIcon spinning={syncStatus === 'syncing'} />
-              </button>
-              <MoneyMenu earned={totalMoney} spent={spent} onSpend={spend} />
-              {!isMobile && <span className="username">Kevin ▾</span>}
-            </div>
-          </div>
-        </div>
         <DailyProgress
           pips={todayPips}
           done={todayDone}
@@ -1798,6 +1754,49 @@ export default function App() {
           daySeed={daySeed}
           earned={todayMoney}
           dayStreak={dayStreak}
+          tools={
+            <div className="app-header-tools">
+              <div className="nav-group">
+                <button className="nav-btn" onClick={() => setOffset(o => o + 1)}>‹</button>
+                <button className="nav-btn" onClick={() => setOffset(o => Math.max(0, o - 1))} disabled={offset === 0}>›</button>
+              </div>
+              <div className="user-bar">
+                <button className="data-btn" onClick={exportData} title="Export your habits">
+                  <DownloadIcon />
+                </button>
+                <button className="data-btn" onClick={() => fileInputRef.current?.click()} title="Import habits from file">
+                  <UploadIcon />
+                </button>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="application/json"
+                  style={{ display: 'none' }}
+                  onChange={e => {
+                    const f = e.target.files?.[0];
+                    if (f) importData(f);
+                    e.target.value = '';
+                  }}
+                />
+                <button
+                  className={`sync-btn sync-btn-${syncStatus}`}
+                  onClick={syncNow}
+                  disabled={syncStatus === 'syncing'}
+                  title={
+                    !isSyncConfigured()       ? 'Sync not configured — click for details' :
+                    syncStatus === 'syncing'  ? 'Syncing…' :
+                    syncStatus === 'synced'   ? 'Saved to cloud — click to sync now' :
+                    syncStatus === 'error'    ? 'Sync error — click to retry' :
+                                               'Click to sync now'
+                  }
+                >
+                  <SyncIcon spinning={syncStatus === 'syncing'} />
+                </button>
+                <MoneyMenu earned={totalMoney} spent={spent} onSpend={spend} />
+                {!isMobile && <span className="username">Kevin ▾</span>}
+              </div>
+            </div>
+          }
         />
       </header>
 
@@ -2009,15 +2008,6 @@ export default function App() {
 
 // ─── Icons ────────────────────────────────────────────────────────────────────
 
-function LogoMark() {
-  return (
-    <svg width="30" height="30" viewBox="0 0 30 30" fill="none">
-      <rect width="30" height="30" rx="7" fill="#4ade80"/>
-      <rect x="6" y="6" width="18" height="18" rx="4" fill="#16a34a"/>
-      <rect x="11" y="11" width="8" height="8" rx="2" fill="#14532d"/>
-    </svg>
-  );
-}
 function MoneyIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none"

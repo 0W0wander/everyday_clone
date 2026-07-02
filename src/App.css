@@ -10,34 +10,35 @@ body {
 /* ─── App shell ──────────────────────────────────────────────────────────── */
 .app { display: flex; flex-direction: column; min-height: 100vh; }
 
-/* ─── Unified header (toolbar + daily progress) ─────────────────────────── */
+/* ─── Unified header (daily progress + toolbar in one row) ──────────────── */
 .app-header {
   flex-shrink: 0;
   display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 10px 24px 14px;
+  flex-direction: row;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 24px;
   background: linear-gradient(135deg, #f0fdf4 0%, #ffffff 55%);
   border-bottom: 1px solid #e2e8f0;
 }
 .app-header.is-complete {
   background: linear-gradient(135deg, #dcfce7 0%, #f0fdf4 65%);
 }
-.app-header-top {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  min-height: 36px;
-}
+.app-header .daily-progress { flex: 1; min-width: 0; }
 .app-header-tools {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-shrink: 0;
 }
-.logo { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
-.logo-text { font-size: 18px; font-weight: 700; color: #0f172a; letter-spacing: -0.4px; }
+
+/* Bottom row of the progress body: quote + toolbar side by side */
+.dp-bottom {
+  display: flex;
+  align-items: flex-end;
+  gap: 28px;
+  flex-wrap: wrap;
+}
 
 .nav-group { display: flex; gap: 4px; }
 .nav-btn {
@@ -259,9 +260,8 @@ body {
 .app-header.is-complete .dp-quote-source { color: #16a34a; }
 
 @media (max-width: 639px) {
-  .app-header { padding: 8px 12px 12px; gap: 8px; }
-  .app-header-top { min-height: 32px; }
-  .logo-text { font-size: 16px; }
+  .app-header { padding: 8px 12px; gap: 10px; flex-wrap: wrap; }
+  .app-header-tools { align-self: center; margin-left: auto; }
   .nav-btn   { width: 28px; height: 26px; font-size: 18px; }
   .data-btn  { width: 28px; height: 28px; }
   .data-btn svg { width: 12px; height: 12px; }
