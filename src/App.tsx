@@ -4,8 +4,11 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import './App.css';
-import type { Habit, HabitColor, HabitLevel, HabitSchedule } from './types';
-import { fetchRemote, pushRemote, isSyncConfigured } from './sync';
+import type { Habit, HabitColor, HabitLevel, HabitSchedule, HabitSnapshot } from './types';
+import {
+  fetchRemote, pushRemote, isSyncConfigured,
+  listGistCommits, fetchRevision, type GistCommit,
+} from './sync';
 import { getQuote } from './quotes';
 
 // ─── Color utilities ──────────────────────────────────────────────────────────
@@ -79,8 +82,10 @@ function getAccent(hex: string): string {
 
 const MONTHS      = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 const DAYS        = ['SUN','MON','TUE','WED','THU','FRI','SAT'];
-const STORAGE_KEY = 'everyday-habits-v2';
-const SPENT_KEY   = 'everyday-spent-v1';
+const STORAGE_KEY    = 'everyday-habits-v2';
+const SPENT_KEY      = 'everyday-spent-v1';
+const LAST_SPEND_KEY = 'everyday-last-spend-v1';
+const SNAPSHOTS_KEY  = 'everyday-snapshots-v1';
 
 function loadSpent(): number {
   try {
@@ -88,6 +93,130 @@ function loadSpent(): number {
     const n = raw ? parseFloat(raw) : 0;
     return Number.isFinite(n) && n > 0 ? n : 0;
   } catch { return 0; }
+}
+
+function loadLastSpend(): number {
+  try {
+    const raw = localStorage.getItem(LAST_SPEND_KEY);
+    const n = raw ? parseFloat(raw) : 0;
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  } catch { return 0; }
+}
+
+function loadSnapshots(): HabitSnapshot[] {
+  try {
+    const raw = localStorage.getItem(SNAPSHOTS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((s): s is HabitSnapshot =>
+      !!s && typeof s === 'object'
+      && typeof s.id === 'string'
+      && typeof s.habitId === 'string'
+      && typeof s.at === 'string'
+      && typeof s.name === 'string'
+      && typeof s.color === 'string',
+    );
+  } catch { return []; }
+}
+
+/** Cloud / local sync blob shape (legacy payloads may omit newer fields). */
+interface SyncPayload {
+  habits: Habit[];
+  spent: number;
+  lastSpend?: number;
+  snapshots?: HabitSnapshot[];
+}
+
+function parseRemotePayload(raw: unknown): {
+  habits: Habit[] | null;
+  spent: number | null;
+  lastSpend: number | null;
+  snapshots: HabitSnapshot[] | null;
+} {
+  if (Array.isArray(raw)) {
+    return { habits: sanitizeAll(raw), spent: null, lastSpend: null, snapshots: null };
+  }
+  if (!raw || typeof raw !== 'object') {
+    return { habits: null, spent: null, lastSpend: null, snapshots: null };
+  }
+  const obj = raw as {
+    habits?: unknown;
+    spent?: unknown;
+    lastSpend?: unknown;
+    snapshots?: unknown;
+  };
+  const habits = Array.isArray(obj.habits) ? sanitizeAll(obj.habits) : null;
+  const spent = typeof obj.spent === 'number' && Number.isFinite(obj.spent) ? Math.max(0, obj.spent) : null;
+  const lastSpend = typeof obj.lastSpend === 'number' && Number.isFinite(obj.lastSpend)
+    ? Math.max(0, obj.lastSpend) : null;
+  let snapshots: HabitSnapshot[] | null = null;
+  if (Array.isArray(obj.snapshots)) {
+    snapshots = obj.snapshots.filter((s): s is HabitSnapshot =>
+      !!s && typeof s === 'object'
+      && typeof (s as HabitSnapshot).id === 'string'
+      && typeof (s as HabitSnapshot).habitId === 'string'
+      && typeof (s as HabitSnapshot).at === 'string'
+      && typeof (s as HabitSnapshot).name === 'string'
+      && typeof (s as HabitSnapshot).color === 'string',
+    );
+  }
+  return { habits, spent, lastSpend, snapshots };
+}
+
+function snapshotFromHabit(h: Habit): HabitSnapshot {
+  return {
+    id: `snap-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    habitId: h.id,
+    at: new Date().toISOString(),
+    name: h.name,
+    color: h.color,
+    price: h.price,
+    bonusPrice: h.bonusPrice,
+    levels: h.levels ? h.levels.map(l => ({ ...l })) : undefined,
+    schedule: h.schedule ? structuredClone(h.schedule) : undefined,
+    sectionBefore: h.sectionBefore,
+  };
+}
+
+function defChanged(
+  h: Habit,
+  next: {
+    name: string; color: HabitColor; price: number; bonusPrice: number;
+    sectionBefore: string; levels: HabitLevel[]; schedule: HabitSchedule | undefined;
+  },
+): boolean {
+  if (h.name !== next.name) return true;
+  if (h.color !== next.color) return true;
+  if ((h.price ?? DEFAULT_PRICE) !== next.price) return true;
+  if ((h.bonusPrice ?? DEFAULT_BONUS_PRICE) !== next.bonusPrice) return true;
+  if ((h.sectionBefore ?? '') !== next.sectionBefore) return true;
+  if (JSON.stringify(h.levels ?? []) !== JSON.stringify(next.levels)) return true;
+  if (JSON.stringify(h.schedule ?? null) !== JSON.stringify(next.schedule ?? null)) return true;
+  return false;
+}
+
+function formatRelativeTime(iso: string): string {
+  const t = new Date(iso).getTime();
+  if (!Number.isFinite(t)) return iso;
+  const sec = Math.round((Date.now() - t) / 1000);
+  if (sec < 60) return 'just now';
+  const min = Math.round(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.round(min / 60);
+  if (hr < 48) return `${hr}h ago`;
+  const days = Math.round(hr / 24);
+  if (days < 30) return `${days}d ago`;
+  return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+function formatSnapshotWhen(iso: string): string {
+  const d = new Date(iso);
+  if (!Number.isFinite(d.getTime())) return iso;
+  return d.toLocaleString(undefined, {
+    month: 'short', day: 'numeric', year: 'numeric',
+    hour: 'numeric', minute: '2-digit',
+  });
 }
 
 // ─── Responsive layout ────────────────────────────────────────────────────────
@@ -493,6 +622,226 @@ function ArchivePanel({ archivedHabits, onRestore, onDelete, onClose }: ArchiveP
   );
 }
 
+// ─── SyncHistoryPanel — restore one of the previous 3 cloud commits ───────────
+
+interface SyncHistoryPanelProps {
+  onRestore: (sha: string) => Promise<void>;
+  onClose: () => void;
+}
+
+function SyncHistoryPanel({ onRestore, onClose }: SyncHistoryPanelProps) {
+  const [commits, setCommits] = useState<GistCommit[] | null>(null);
+  const [error, setError]     = useState<string | null>(null);
+  const [busy, setBusy]       = useState<string | null>(null);
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [onClose]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const result = await listGistCommits(4);
+      if (cancelled) return;
+      if (!result.ok) {
+        setError(result.error);
+        setCommits([]);
+        return;
+      }
+      // Skip index 0 (current HEAD); offer the previous three.
+      setCommits(result.data.slice(1, 4));
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const restore = async (sha: string) => {
+    if (!window.confirm('Replace your current data with this earlier cloud version? Your current state will be overwritten and synced.')) return;
+    setBusy(sha);
+    try {
+      await onRestore(sha);
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return createPortal(
+    <div className="archive-overlay" onClick={onClose}>
+      <div className="archive-panel" onClick={e => e.stopPropagation()}>
+        <div className="archive-panel-header">
+          <div className="archive-panel-title-group">
+            <HistoryIcon />
+            <span className="archive-panel-title">Cloud history</span>
+          </div>
+          <button className="archive-close-btn" onClick={onClose}>✕</button>
+        </div>
+        <p className="history-hint">
+          Go back up to three previous syncs — useful if another computer overwrote your data.
+        </p>
+        {error && <p className="history-error">{error}</p>}
+        {commits === null ? (
+          <p className="archive-empty">Loading revisions…</p>
+        ) : commits.length === 0 ? (
+          <p className="archive-empty">No earlier versions yet. Sync a few times first.</p>
+        ) : (
+          <ul className="archive-list">
+            {commits.map((c, i) => (
+              <li key={c.version} className="archive-item history-item">
+                <div className="history-item-meta">
+                  <span className="history-item-label">
+                    {i === 0 ? 'Previous sync' : i === 1 ? '2 syncs ago' : '3 syncs ago'}
+                  </span>
+                  <span className="history-item-time">{formatRelativeTime(c.committed_at)}</span>
+                </div>
+                <button
+                  className="btn-restore"
+                  disabled={busy !== null}
+                  onClick={() => restore(c.version)}
+                >
+                  {busy === c.version ? 'Restoring…' : 'Restore'}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+// ─── HabitHistoryPanel — browse definition snapshots for one habit ────────────
+
+interface HabitHistoryPanelProps {
+  habitName: string;
+  snapshots: HabitSnapshot[];
+  onRestore: (snap: HabitSnapshot) => void;
+  onClose: () => void;
+}
+
+function HabitHistoryPanel({ habitName, snapshots, onRestore, onClose }: HabitHistoryPanelProps) {
+  const [expanded, setExpanded] = useState<string | null>(null);
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [onClose]);
+
+  const sorted = useMemo(
+    () => [...snapshots].sort((a, b) => b.at.localeCompare(a.at)),
+    [snapshots],
+  );
+
+  return createPortal(
+    <div className="archive-overlay" onClick={onClose}>
+      <div className="archive-panel habit-history-panel" onClick={e => e.stopPropagation()}>
+        <div className="archive-panel-header">
+          <div className="archive-panel-title-group">
+            <HistoryIcon />
+            <span className="archive-panel-title">History — {habitName}</span>
+          </div>
+          <button className="archive-close-btn" onClick={onClose}>✕</button>
+        </div>
+        <p className="history-hint">
+          Snapshots are saved whenever you edit this habit’s name, levels, price, or schedule.
+        </p>
+        {sorted.length === 0 ? (
+          <p className="archive-empty">No snapshots yet. Edit and save this habit to start a timeline.</p>
+        ) : (
+          <ul className="archive-list">
+            {sorted.map(s => {
+              const open = expanded === s.id;
+              const levelNames = [
+                s.name,
+                ...(s.levels ?? []).map(l => l.name),
+              ].filter(Boolean);
+              return (
+                <li key={s.id} className="habit-snap-item">
+                  <button
+                    className="habit-snap-header"
+                    onClick={() => setExpanded(open ? null : s.id)}
+                  >
+                    <div
+                      className="archive-color-dot"
+                      style={{ backgroundColor: getPalette(s.color)[5] }}
+                    />
+                    <div className="habit-snap-summary">
+                      <span className="habit-snap-name">{s.name}</span>
+                      <span className="habit-snap-when">{formatSnapshotWhen(s.at)}</span>
+                    </div>
+                    <span className="habit-snap-chevron">{open ? '▾' : '▸'}</span>
+                  </button>
+                  {open && (
+                    <div className="habit-snap-body">
+                      <div className="habit-snap-row">
+                        <span>Price</span>
+                        <span>${(s.price ?? DEFAULT_PRICE).toFixed(2)}</span>
+                      </div>
+                      {(s.bonusPrice != null || !(s.levels?.length)) && (
+                        <div className="habit-snap-row">
+                          <span>Bonus</span>
+                          <span>${(s.bonusPrice ?? DEFAULT_BONUS_PRICE).toFixed(2)}</span>
+                        </div>
+                      )}
+                      {levelNames.length > 1 && (
+                        <div className="habit-snap-levels">
+                          <span className="habit-snap-levels-label">Levels</span>
+                          <ol>
+                            {levelNames.map((n, i) => {
+                              const price = i === 0
+                                ? (s.price ?? DEFAULT_PRICE)
+                                : (s.levels?.[i - 1]?.price ?? DEFAULT_PRICE);
+                              return (
+                                <li key={i}>{n} · ${price.toFixed(2)}</li>
+                              );
+                            })}
+                          </ol>
+                        </div>
+                      )}
+                      {s.schedule && (
+                        <div className="habit-snap-row">
+                          <span>Schedule</span>
+                          <span>
+                            {s.schedule.type === 'daily' && 'Every day'}
+                            {s.schedule.type === 'weekly' && `Weekdays: ${s.schedule.weekdays.join(',')}`}
+                            {s.schedule.type === 'interval' && `Every ${s.schedule.every}d cooldown`}
+                          </span>
+                        </div>
+                      )}
+                      {s.sectionBefore && (
+                        <div className="habit-snap-row">
+                          <span>Section</span>
+                          <span>{s.sectionBefore}</span>
+                        </div>
+                      )}
+                      <button
+                        className="btn-restore habit-snap-restore"
+                        onClick={() => {
+                          if (!window.confirm('Restore this habit’s name, levels, and settings from this snapshot? Completions stay as they are.')) return;
+                          onRestore(s);
+                          onClose();
+                        }}
+                      >
+                        Restore this version
+                      </button>
+                    </div>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
 // ─── CommentPopover ───────────────────────────────────────────────────────────
 
 interface CommentPopoverProps {
@@ -614,16 +963,18 @@ function useAnchoredPosition(
 
 interface EditPanelProps {
   habit: Habit;
+  snapshotCount: number;
   onSave:     (name: string, color: HabitColor, price: number, bonusPrice: number, sectionBefore: string, levels: HabitLevel[], schedule: HabitSchedule | undefined) => void;
   onCancel:   () => void;
   onDelete:   () => void;
   onArchive:  () => void;
+  onHistory:  () => void;
 }
 
 // Draft level row in the editor — price kept as string for free typing
 interface LevelDraft { name: string; price: string; }
 
-function EditPanel({ habit, onSave, onCancel, onDelete, onArchive }: EditPanelProps) {
+function EditPanel({ habit, snapshotCount, onSave, onCancel, onDelete, onArchive, onHistory }: EditPanelProps) {
 
   const [name,          setName]          = useState(habit.name);
   const [color,         setColor]         = useState<string>(habit.color);
@@ -856,6 +1207,14 @@ function EditPanel({ habit, onSave, onCancel, onDelete, onArchive }: EditPanelPr
       <div className="edit-panel-actions">
         <button className="btn-save" onClick={handleSave}>Save</button>
         <button className="btn-cancel" onClick={onCancel}>Cancel</button>
+        <button
+          className="btn-history"
+          onClick={onHistory}
+          title={snapshotCount > 0 ? `View ${snapshotCount} snapshot${snapshotCount === 1 ? '' : 's'}` : 'View habit history'}
+        >
+          <HistoryIcon />
+          {snapshotCount > 0 && <span className="btn-history-count">{snapshotCount}</span>}
+        </button>
         <button className="btn-archive" onClick={onArchive} title="Archive habit">
           <ArchiveIcon />
         </button>
@@ -1290,7 +1649,9 @@ const DailyProgress = memo(function DailyProgress(
 // ─── MoneyMenu — top-right balance with a hover "spend" popover ──────────────
 
 const MoneyMenu = memo(function MoneyMenu(
-  { earned, spent, onSpend }: { earned: number; spent: number; onSpend: (amt: number) => void; }
+  { earned, spent, lastSpend, onSpend }: {
+    earned: number; spent: number; lastSpend: number; onSpend: (amt: number) => void;
+  }
 ) {
   const [open, setOpen] = useState(false);
   const [amt, setAmt]   = useState('');
@@ -1319,7 +1680,12 @@ const MoneyMenu = memo(function MoneyMenu(
         <div className="money-menu" onMouseEnter={openNow} onMouseLeave={closeSoon}>
           <div className="money-menu-rows">
             <div className="money-menu-row"><span>Earned</span><span className="mm-pos">+${earned.toFixed(2)}</span></div>
-            <div className="money-menu-row"><span>Spent</span><span className="mm-neg">-${spent.toFixed(2)}</span></div>
+            <div className="money-menu-row">
+              <span>Last spent</span>
+              <span className="mm-neg">
+                {lastSpend > 0 ? `-$${lastSpend.toFixed(2)}` : '$0.00'}
+              </span>
+            </div>
             <div className="money-menu-row money-menu-total"><span>Balance</span><span>${balance.toFixed(2)}</span></div>
           </div>
           <div className="money-spend">
@@ -1352,6 +1718,8 @@ export default function App() {
   const [offset,         setOffset]         = useState(0);
   const [adding,         setAdding]         = useState(false);
   const [spent,          setSpent]          = useState<number>(loadSpent);
+  const [lastSpend,      setLastSpend]      = useState<number>(loadLastSpend);
+  const [snapshots,      setSnapshots]      = useState<HabitSnapshot[]>(loadSnapshots);
   const [editMode,       setEditMode]       = useState(false);
   const [showAllHabits,  setShowAllHabits]  = useState(false);
   const [editingId,      setEditingId]      = useState<string | null>(null);
@@ -1361,6 +1729,8 @@ export default function App() {
   const [analyticsView,  setAnalyticsView]  = useState<0 | 1 | 2>(0);
   const [syncStatus,  setSyncStatus]  = useState<'idle'|'syncing'|'synced'|'error'>('idle');
   const [syncToast,   setSyncToast]   = useState<{ type: 'success'|'error'; msg: string } | null>(null);
+  const [showSyncHistory, setShowSyncHistory] = useState(false);
+  const [historyHabitId,  setHistoryHabitId]  = useState<string | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const showToast = useCallback((type: 'success'|'error', msg: string) => {
@@ -1377,6 +1747,8 @@ export default function App() {
   const isFirstLoad  = useRef(true);
   const habitsRef    = useRef<Habit[]>(habits);
   const spentRef     = useRef<number>(spent);
+  const lastSpendRef = useRef<number>(lastSpend);
+  const snapshotsRef = useRef<HabitSnapshot[]>(snapshots);
 
   const vw     = useViewportWidth();
   const layout = useMemo(() => getLayout(vw), [vw]);
@@ -1389,9 +1761,26 @@ export default function App() {
   const archivedHabits = useMemo(() => habits.filter(h =>  h.archived), [habits]);
 
   useEffect(() => { localStorage.setItem(SPENT_KEY, String(spent)); spentRef.current = spent; }, [spent]);
+  useEffect(() => {
+    localStorage.setItem(LAST_SPEND_KEY, String(lastSpend));
+    lastSpendRef.current = lastSpend;
+  }, [lastSpend]);
+  useEffect(() => {
+    localStorage.setItem(SNAPSHOTS_KEY, JSON.stringify(snapshots));
+    snapshotsRef.current = snapshots;
+  }, [snapshots]);
+
+  const buildPayload = useCallback((): SyncPayload => ({
+    habits: habitsRef.current,
+    spent: spentRef.current,
+    lastSpend: lastSpendRef.current,
+    snapshots: snapshotsRef.current,
+  }), []);
 
   const spend = useCallback((amt: number) => {
     setSpent(s => Math.max(0, Math.round((s + amt) * 100) / 100));
+    if (amt > 0) setLastSpend(Math.round(amt * 100) / 100);
+    else setLastSpend(0);
   }, []);
 
   // Persist locally + debounce cloud push (silent background — errors shown via dot only)
@@ -1402,26 +1791,31 @@ export default function App() {
     if (syncTimer.current) clearTimeout(syncTimer.current);
     setSyncStatus('syncing');
     syncTimer.current = setTimeout(() => {
-      pushRemote({ habits, spent: spentRef.current }).then(result => {
+      pushRemote(buildPayload()).then(result => {
         setSyncStatus(result.ok ? 'synced' : 'error');
       });
     }, 1500);
-  }, [habits]);
+  }, [habits, buildPayload]);
 
-  // Also push when spent changes (debounced separately)
+  // Also push when spent / lastSpend / snapshots change (debounced separately)
   const spentSyncTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     if (isFirstLoad.current) return;
     if (!isSyncConfigured()) return;
     if (spentSyncTimer.current) clearTimeout(spentSyncTimer.current);
     spentSyncTimer.current = setTimeout(() => {
-      pushRemote({ habits: habitsRef.current, spent }).then(result => {
+      pushRemote(buildPayload()).then(result => {
         setSyncStatus(result.ok ? 'synced' : 'error');
       });
     }, 1500);
-  }, [spent]);
+  }, [spent, lastSpend, snapshots, buildPayload]);
 
-  useEffect(() => { habitsRef.current = habits; spentRef.current = spent; }, [habits, spent]);
+  useEffect(() => {
+    habitsRef.current = habits;
+    spentRef.current = spent;
+    lastSpendRef.current = lastSpend;
+    snapshotsRef.current = snapshots;
+  }, [habits, spent, lastSpend, snapshots]);
 
   useEffect(() => {
     if (!isSyncConfigured()) return;
@@ -1429,28 +1823,21 @@ export default function App() {
     fetchRemote<unknown>()
       .then(result => {
         if (!result.ok) { setSyncStatus('error'); return; }
-        // Payload can be either legacy (raw array) or new { habits, spent } shape
-        const raw = result.data;
-        const rawHabits = Array.isArray(raw) ? raw
-          : (raw && typeof raw === 'object' && Array.isArray((raw as { habits?: unknown }).habits))
-            ? (raw as { habits: unknown[] }).habits
-            : null;
-        const remoteSpent = (raw && typeof raw === 'object' && typeof (raw as { spent?: unknown }).spent === 'number')
-          ? (raw as { spent: number }).spent
-          : null;
+        const parsed = parseRemotePayload(result.data);
 
-        if (rawHabits && rawHabits.length > 0) {
-          const clean = sanitizeAll(rawHabits);
-          setHabits(clean);
-          if (remoteSpent !== null) setSpent(remoteSpent);
+        if (parsed.habits && parsed.habits.length > 0) {
+          setHabits(parsed.habits);
+          if (parsed.spent !== null) setSpent(parsed.spent);
+          if (parsed.lastSpend !== null) setLastSpend(parsed.lastSpend);
+          if (parsed.snapshots !== null) setSnapshots(parsed.snapshots);
         } else {
           // Nothing valid on remote — push local state to initialise
-          pushRemote({ habits: habitsRef.current, spent: spentRef.current });
+          pushRemote(buildPayload());
         }
         setSyncStatus('synced');
       })
       .finally(() => { isFirstLoad.current = false; });
-  }, []);
+  }, [buildPayload]);
 
 
   // Remove a date key from a dayLevels map (returns undefined if it empties out)
@@ -1530,6 +1917,11 @@ export default function App() {
   }, []);
 
   const saveEdit = useCallback((name: string, color: HabitColor, price: number, bonusPrice: number, sectionBefore: string, levels: HabitLevel[], schedule: HabitSchedule | undefined) => {
+    const nextVals = { name, color, price, bonusPrice, sectionBefore, levels, schedule };
+    const current = habitsRef.current.find(h => h.id === editingId);
+    if (current && defChanged(current, nextVals)) {
+      setSnapshots(snaps => [snapshotFromHabit(current), ...snaps]);
+    }
     setHabits(prev => prev.map(h => {
       if (h.id !== editingId) return h;
       const hasLevels = levels.length > 0;
@@ -1556,6 +1948,41 @@ export default function App() {
     setEditingId(null);
   }, [editingId]);
 
+  const restoreHabitSnapshot = useCallback((snap: HabitSnapshot) => {
+    const current = habitsRef.current.find(h => h.id === snap.habitId);
+    if (current) {
+      setSnapshots(snaps => [snapshotFromHabit(current), ...snaps]);
+    }
+    setHabits(prev => prev.map(h => {
+      if (h.id !== snap.habitId) return h;
+      const levels = snap.levels?.length ? snap.levels.map(l => ({ ...l })) : undefined;
+      const hasLevels = (levels?.length ?? 0) > 0;
+      const maxIdx = levels?.length ?? 0;
+      let dayLevels = h.dayLevels;
+      if (!hasLevels) {
+        dayLevels = undefined;
+      } else if (dayLevels) {
+        dayLevels = Object.fromEntries(
+          Object.entries(dayLevels).map(([k, v]) => [k, Math.min(v, maxIdx)])
+        );
+      }
+      return {
+        ...h,
+        name: snap.name,
+        color: snap.color,
+        price: snap.price,
+        bonusPrice: snap.bonusPrice,
+        levels,
+        schedule: snap.schedule ? structuredClone(snap.schedule) : undefined,
+        sectionBefore: snap.sectionBefore,
+        dayLevels,
+        activeLevel: hasLevels ? Math.min(h.activeLevel ?? 0, maxIdx) : undefined,
+      };
+    }));
+    setEditingId(null);
+    showToast('success', 'Habit restored from snapshot');
+  }, [showToast]);
+
   // Set the currently-active level for a habit (used for new completions)
   const setActiveLevel = useCallback((id: string, level: number) => {
     setHabits(prev => prev.map(h => h.id === id ? { ...h, activeLevel: level } : h));
@@ -1580,7 +2007,7 @@ export default function App() {
     }
     setSyncStatus('syncing');
     // Push first so remote always has our latest
-    const pushResult = await pushRemote({ habits: habitsRef.current, spent: spentRef.current });
+    const pushResult = await pushRemote(buildPayload());
     if (!pushResult.ok) {
       setSyncStatus('error');
       showToast('error', `Push failed: ${pushResult.error}`);
@@ -1595,6 +2022,41 @@ export default function App() {
     }
     setSyncStatus('synced');
     showToast('success', 'Synced to cloud ✓');
+  }, [showToast, buildPayload]);
+
+  const restoreCloudRevision = useCallback(async (sha: string) => {
+    setSyncStatus('syncing');
+    const result = await fetchRevision<unknown>(sha);
+    if (!result.ok) {
+      setSyncStatus('error');
+      showToast('error', `Could not load revision: ${result.error}`);
+      throw new Error(result.error);
+    }
+    const parsed = parseRemotePayload(result.data);
+    if (!parsed.habits || parsed.habits.length === 0) {
+      setSyncStatus('error');
+      const msg = 'That revision has no habits to restore.';
+      showToast('error', msg);
+      throw new Error(msg);
+    }
+    setHabits(parsed.habits);
+    if (parsed.spent !== null) setSpent(parsed.spent);
+    if (parsed.lastSpend !== null) setLastSpend(parsed.lastSpend);
+    if (parsed.snapshots !== null) setSnapshots(parsed.snapshots);
+    // Push restored state as the new HEAD so other devices pick it up
+    const pushResult = await pushRemote({
+      habits: parsed.habits,
+      spent: parsed.spent ?? spentRef.current,
+      lastSpend: parsed.lastSpend ?? lastSpendRef.current,
+      snapshots: parsed.snapshots ?? snapshotsRef.current,
+    });
+    if (!pushResult.ok) {
+      setSyncStatus('error');
+      showToast('error', `Restored locally but push failed: ${pushResult.error}`);
+      return;
+    }
+    setSyncStatus('synced');
+    showToast('success', 'Restored previous cloud version ✓');
   }, [showToast]);
 
   const restoreHabit = useCallback((id: string) => {
@@ -1792,7 +2254,20 @@ export default function App() {
                 >
                   <SyncIcon spinning={syncStatus === 'syncing'} />
                 </button>
-                <MoneyMenu earned={totalMoney} spent={spent} onSpend={spend} />
+                <button
+                  className="data-btn"
+                  onClick={() => {
+                    if (!isSyncConfigured()) {
+                      showToast('error', 'Sync not configured — add VITE_GIST_ID and VITE_GITHUB_TOKEN in Vercel settings');
+                      return;
+                    }
+                    setShowSyncHistory(true);
+                  }}
+                  title="Restore a previous cloud sync"
+                >
+                  <HistoryIcon />
+                </button>
+                <MoneyMenu earned={totalMoney} spent={spent} lastSpend={lastSpend} onSpend={spend} />
                 {!isMobile && <span className="username">Kevin ▾</span>}
               </div>
             </div>
@@ -1947,10 +2422,15 @@ export default function App() {
       {editingHabit && (
         <EditPanel
           habit={editingHabit}
+          snapshotCount={snapshots.filter(s => s.habitId === editingHabit.id).length}
           onSave={saveEdit}
           onCancel={cancelEdit}
           onDelete={deleteHabit}
           onArchive={archiveHabit}
+          onHistory={() => {
+            setHistoryHabitId(editingHabit.id);
+            setEditingId(null);
+          }}
         />
       )}
 
@@ -1972,6 +2452,27 @@ export default function App() {
           onClose={() => setShowArchive(false)}
         />
       )}
+
+      {/* ── Cloud sync history ── */}
+      {showSyncHistory && (
+        <SyncHistoryPanel
+          onRestore={restoreCloudRevision}
+          onClose={() => setShowSyncHistory(false)}
+        />
+      )}
+
+      {/* ── Habit definition history ── */}
+      {historyHabitId && (() => {
+        const h = habits.find(x => x.id === historyHabitId);
+        return (
+          <HabitHistoryPanel
+            habitName={h?.name ?? 'Habit'}
+            snapshots={snapshots.filter(s => s.habitId === historyHabitId)}
+            onRestore={restoreHabitSnapshot}
+            onClose={() => setHistoryHabitId(null)}
+          />
+        );
+      })()}
 
       {/* ── Comment Popover ── */}
       {commentTarget && (() => {
@@ -2145,6 +2646,20 @@ function SyncIcon({ spinning }: { spinning: boolean }) {
       <polyline points="1 4 1 10 7 10"/>
       <polyline points="23 20 23 14 17 14"/>
       <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+    </svg>
+  );
+}
+
+function HistoryIcon() {
+  return (
+    <svg
+      width="14" height="14" viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+      <path d="M3 3v5h5"/>
+      <path d="M12 7v5l3 3"/>
     </svg>
   );
 }

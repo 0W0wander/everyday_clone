@@ -32,3 +32,17 @@ export interface Habit {
   archived?: boolean;
   comments?: Record<string, string>; // YYYY-MM-DD → free-text note
 }
+
+/** Point-in-time copy of a habit's editable definition (not day completions). */
+export interface HabitSnapshot {
+  id: string;
+  habitId: string;
+  at: string; // ISO timestamp
+  name: string;
+  color: HabitColor;
+  price?: number;
+  bonusPrice?: number;
+  levels?: HabitLevel[];
+  schedule?: HabitSchedule;
+  sectionBefore?: string;
+}

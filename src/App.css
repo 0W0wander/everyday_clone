@@ -77,7 +77,7 @@ body {
   right: 0;
   margin-top: 8px;
   z-index: 9999;
-  width: 200px;
+  width: 210px;
   background: #fff;
   border: 1px solid #e2e8f0;
   border-radius: 10px;
@@ -730,6 +730,19 @@ body {
 }
 .btn-archive:hover { background: #fef3c7; border-color: #fde68a; color: #92400e; }
 
+.btn-history {
+  position: relative;
+  background: none; border: 1px solid #e2e8f0; border-radius: 5px;
+  padding: 5px 9px; cursor: pointer; color: #64748b;
+  display: flex; align-items: center; gap: 4px;
+  transition: background 0.1s, border-color 0.1s, color 0.1s;
+}
+.btn-history:hover { background: #eff6ff; border-color: #bfdbfe; color: #1d4ed8; }
+.btn-history-count {
+  font-size: 10px; font-weight: 700; font-family: inherit;
+  color: #1d4ed8; line-height: 1;
+}
+
 .btn-delete {
   margin-left: auto;
   background: none; border: 1px solid #fecaca; border-radius: 5px;
@@ -1252,6 +1265,7 @@ body {
   white-space: nowrap; flex-shrink: 0;
 }
 .btn-restore:hover { background: #dcfce7; border-color: #86efac; }
+.btn-restore:disabled { opacity: 0.55; cursor: default; }
 .btn-delete-perm {
   background: none; border: 1px solid #fecaca; border-radius: 5px;
   padding: 4px 8px; cursor: pointer; color: #dc2626;
@@ -1260,6 +1274,122 @@ body {
   flex-shrink: 0;
 }
 .btn-delete-perm:hover { background: #fee2e2; }
+
+/* ─── History panels (cloud commits + habit snapshots) ───────────────────── */
+.history-hint {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: #64748b;
+}
+.history-error {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: #b91c1c;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+.history-item {
+  justify-content: space-between;
+}
+.history-item-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.history-item-label {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: #0f172a;
+}
+.history-item-time {
+  font-size: 11.5px;
+  color: #94a3b8;
+}
+.habit-history-panel { max-width: 520px; }
+.habit-snap-item {
+  border: 1px solid #f1f5f9;
+  border-radius: 9px;
+  background: #f8fafc;
+  overflow: hidden;
+}
+.habit-snap-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+}
+.habit-snap-header:hover { background: #f1f5f9; }
+.habit-snap-summary {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.habit-snap-name {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: #0f172a;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.habit-snap-when {
+  font-size: 11.5px;
+  color: #94a3b8;
+}
+.habit-snap-chevron {
+  color: #94a3b8;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+.habit-snap-body {
+  padding: 0 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-top: 1px solid #eef2f7;
+  padding-top: 10px;
+}
+.habit-snap-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12.5px;
+  color: #64748b;
+}
+.habit-snap-row span:last-child {
+  color: #0f172a;
+  font-weight: 600;
+  text-align: right;
+}
+.habit-snap-levels {
+  font-size: 12.5px;
+  color: #64748b;
+}
+.habit-snap-levels-label {
+  display: block;
+  margin-bottom: 4px;
+}
+.habit-snap-levels ol {
+  margin: 0;
+  padding-left: 18px;
+  color: #0f172a;
+  font-weight: 500;
+}
+.habit-snap-levels li { margin: 2px 0; }
+.habit-snap-restore { align-self: flex-start; margin-top: 4px; }
 
 /* ─── Mobile (< 640px) ──────────────────────────────────────────────────── */
 @media (max-width: 639px) {
