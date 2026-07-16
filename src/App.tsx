@@ -338,49 +338,107 @@ function useViewportWidth(): number {
 }
 
 // ─── Streak helpers ───────────────────────────────────────────────────────────
+// Completions count; skips and off-schedule days are transparent (don't break,
+// don't count). A due day that was failed or left empty breaks the chain.
 
-function streakAt(comp: Set<string>, skip: Set<string>, ds: string): number {
+function streakEarliest(h: Habit): string | null {
+  let earliest: string | null = null;
+  for (const ds of [...h.completions, ...h.skips]) {
+    if (earliest === null || ds < earliest) earliest = ds;
+  }
+  return earliest;
+}
+
+/** Streak of completions ending on `ds` (must be a completed or skipped day). */
+function streakAt(h: Habit, ds: string): number {
+  const comp = new Set(h.completions);
+  const skip = new Set(h.skips);
+  const fail = new Set(h.fails);
   if (!comp.has(ds) && !skip.has(ds)) return 0;
-  let n = comp.has(ds) ? 1 : 0;
+
+  const earliest = streakEarliest(h) ?? ds;
+  let n = 0;
   const d = new Date(ds + 'T12:00:00');
-  for (;;) {
-    d.setDate(d.getDate() - 1);
+  while (fmt(d) >= earliest) {
     const s = fmt(d);
-    if (comp.has(s)) { n++; }
-    else if (skip.has(s)) { /* skip is transparent — no increment, no limit */ }
-    else break;
+    if (comp.has(s)) {
+      n++;
+    } else if (skip.has(s)) {
+      // transparent
+    } else if (fail.has(s)) {
+      break;
+    } else if (!isScheduledOn(h, s)) {
+      // off-day (rest / not due) — transparent
+    } else {
+      break; // due but empty
+    }
+    d.setDate(d.getDate() - 1);
   }
   return n;
 }
 
-function calcCurrentStreak(completions: string[], skips: string[]): number {
-  const comp = new Set(completions), skip = new Set(skips);
-  const t = todayNoon(), ts = fmt(t);
-  const y = new Date(t); y.setDate(y.getDate() - 1); const ys = fmt(y);
-  if (comp.has(ts) || skip.has(ts)) return streakAt(comp, skip, ts);
-  if (comp.has(ys) || skip.has(ys)) return streakAt(comp, skip, ys);
-  return 0;
+function calcCurrentStreak(h: Habit): number {
+  const comp = new Set(h.completions);
+  const skip = new Set(h.skips);
+  const fail = new Set(h.fails);
+  const earliest = streakEarliest(h);
+  if (earliest === null) return 0;
+
+  const today = fmt(todayNoon());
+  const d = todayNoon();
+  let n = 0;
+
+  while (fmt(d) >= earliest) {
+    const s = fmt(d);
+    if (comp.has(s)) {
+      n++;
+    } else if (skip.has(s)) {
+      // transparent
+    } else if (fail.has(s)) {
+      break;
+    } else if (!isScheduledOn(h, s)) {
+      // off-day — transparent
+    } else if (s === today) {
+      // grace: today is still in progress
+    } else {
+      break; // missed a due day
+    }
+    d.setDate(d.getDate() - 1);
+  }
+  return n;
 }
 
-function calcLongestStreak(completions: string[], skips: string[]): number {
-  const skipSet = new Set(skips);
-  const all = [...new Set([...completions, ...skips])].sort();
-  if (!all.length) return 0;
-  let max = 0, cur = skipSet.has(all[0]) ? 0 : 1;
-  for (let i = 1; i < all.length; i++) {
-    const diff = Math.round(
-      (new Date(all[i] + 'T12:00:00').getTime() -
-       new Date(all[i-1] + 'T12:00:00').getTime()) / 86400000
-    );
-    if (diff !== 1) {
-      max = Math.max(max, cur);
-      cur = skipSet.has(all[i]) ? 0 : 1;
-    } else if (!skipSet.has(all[i])) {
+function calcLongestStreak(h: Habit): number {
+  const comp = new Set(h.completions);
+  const skip = new Set(h.skips);
+  const fail = new Set(h.fails);
+  const earliest = streakEarliest(h);
+  if (earliest === null) return 0;
+
+  const today = fmt(todayNoon());
+  let max = 0;
+  let cur = 0;
+  const d = new Date(earliest + 'T12:00:00');
+
+  while (fmt(d) <= today) {
+    const s = fmt(d);
+    if (comp.has(s)) {
       cur++;
+      if (cur > max) max = cur;
+    } else if (skip.has(s)) {
+      // transparent
+    } else if (fail.has(s)) {
+      cur = 0;
+    } else if (!isScheduledOn(h, s)) {
+      // off-day — transparent
+    } else if (s === today) {
+      // today still open — don't wipe the run
+    } else {
+      cur = 0;
     }
-    // skips are transparent — no increment, no break
+    d.setDate(d.getDate() + 1);
   }
-  return Math.max(max, cur);
+  return max;
 }
 
 // Consecutive days (ending today, or yesterday if today isn't finished yet) on
@@ -1377,8 +1435,8 @@ const HabitRow = memo(function HabitRow(
   const skip  = useMemo(() => new Set(habit.skips),       [habit.skips]);
   const fail  = useMemo(() => new Set(habit.fails),       [habit.fails]);
   const bonus = useMemo(() => new Set(habit.bonuses ?? []), [habit.bonuses]);
-  const cur  = useMemo(() => calcCurrentStreak(habit.completions, habit.skips),  [habit.completions, habit.skips]);
-  const lon  = useMemo(() => calcLongestStreak(habit.completions, habit.skips),  [habit.completions, habit.skips]);
+  const cur  = useMemo(() => calcCurrentStreak(habit), [habit]);
+  const lon  = useMemo(() => calcLongestStreak(habit), [habit]);
   const acc  = getAccent(habit.color);
   const doneToday = comp.has(fmt(todayNoon()));   // completed for today?
   const urgeMax   = lon > 0 && cur >= lon && !doneToday; // at record run but today not done yet
@@ -1448,7 +1506,7 @@ const HabitRow = memo(function HabitRow(
         const skpd  = skip.has(ds);
         const faild = fail.has(ds);
         const bns   = done && bonus.has(ds);
-        const str   = (done || skpd) ? streakAt(comp, skip, ds) : 0;
+        const str   = (done || skpd) ? streakAt(habit, ds) : 0;
         const bg    = cellBg(str, habit.color);
         const isTd  = isCurrentDay && i === dates.length - 1;
 
