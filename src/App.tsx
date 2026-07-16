@@ -1,10 +1,9 @@
 import {
-  Fragment,
   useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, memo,
 } from 'react';
 import { createPortal } from 'react-dom';
 import './App.css';
-import type { Habit, HabitColor, HabitLevel, HabitSchedule, HabitSnapshot } from './types';
+import type { Habit, HabitColor, HabitLevel, HabitSchedule, HabitSnapshot, BoardSection } from './types';
 import {
   fetchRemote, pushRemote, isSyncConfigured,
   listGistCommits, fetchRevision, type GistCommit,
@@ -19,8 +18,7 @@ const LEGACY_COLOR_HEX: Record<string, string> = {
   orange: '#fb923c', red:    '#fb7185', purple: '#d946ef', teal:   '#2dd4bf',
 };
 const DEFAULT_COLOR = '#4ade80';
-const DEFAULT_PRICE       = 0.1;  // $ per normal completion
-const DEFAULT_BONUS_PRICE = 1;    // $ per middle-click "bonus" completion
+const DEFAULT_PRICE = 0.1;  // $ per normal / base-level completion
 
 // #rrggbb (or #rgb) → [H 0-360, S 0-100, L 0-100]
 function hexToHsl(hex: string): [number, number, number] {
@@ -123,30 +121,42 @@ function loadSnapshots(): HabitSnapshot[] {
 /** Cloud / local sync blob shape (legacy payloads may omit newer fields). */
 interface SyncPayload {
   habits: Habit[];
+  sections?: BoardSection[];
+  boardOrder?: string[];
   spent: number;
   lastSpend?: number;
   snapshots?: HabitSnapshot[];
 }
 
+interface BoardState {
+  habits: Habit[];
+  sections: BoardSection[];
+  boardOrder: string[];
+}
+
 function parseRemotePayload(raw: unknown): {
-  habits: Habit[] | null;
+  board: BoardState | null;
   spent: number | null;
   lastSpend: number | null;
   snapshots: HabitSnapshot[] | null;
 } {
   if (Array.isArray(raw)) {
-    return { habits: sanitizeAll(raw), spent: null, lastSpend: null, snapshots: null };
+    return { board: boardFromLegacyHabits(raw), spent: null, lastSpend: null, snapshots: null };
   }
   if (!raw || typeof raw !== 'object') {
-    return { habits: null, spent: null, lastSpend: null, snapshots: null };
+    return { board: null, spent: null, lastSpend: null, snapshots: null };
   }
   const obj = raw as {
     habits?: unknown;
+    sections?: unknown;
+    boardOrder?: unknown;
     spent?: unknown;
     lastSpend?: unknown;
     snapshots?: unknown;
   };
-  const habits = Array.isArray(obj.habits) ? sanitizeAll(obj.habits) : null;
+  const board = Array.isArray(obj.habits)
+    ? sanitizeBoard(obj.habits, obj.sections, obj.boardOrder)
+    : null;
   const spent = typeof obj.spent === 'number' && Number.isFinite(obj.spent) ? Math.max(0, obj.spent) : null;
   const lastSpend = typeof obj.lastSpend === 'number' && Number.isFinite(obj.lastSpend)
     ? Math.max(0, obj.lastSpend) : null;
@@ -161,7 +171,7 @@ function parseRemotePayload(raw: unknown): {
       && typeof (s as HabitSnapshot).color === 'string',
     );
   }
-  return { habits, spent, lastSpend, snapshots };
+  return { board, spent, lastSpend, snapshots };
 }
 
 function snapshotFromHabit(h: Habit): HabitSnapshot {
@@ -172,25 +182,21 @@ function snapshotFromHabit(h: Habit): HabitSnapshot {
     name: h.name,
     color: h.color,
     price: h.price,
-    bonusPrice: h.bonusPrice,
     levels: h.levels ? h.levels.map(l => ({ ...l })) : undefined,
     schedule: h.schedule ? structuredClone(h.schedule) : undefined,
-    sectionBefore: h.sectionBefore,
   };
 }
 
 function defChanged(
   h: Habit,
   next: {
-    name: string; color: HabitColor; price: number; bonusPrice: number;
-    sectionBefore: string; levels: HabitLevel[]; schedule: HabitSchedule | undefined;
+    name: string; color: HabitColor; price: number;
+    levels: HabitLevel[]; schedule: HabitSchedule | undefined;
   },
 ): boolean {
   if (h.name !== next.name) return true;
   if (h.color !== next.color) return true;
   if ((h.price ?? DEFAULT_PRICE) !== next.price) return true;
-  if ((h.bonusPrice ?? DEFAULT_BONUS_PRICE) !== next.bonusPrice) return true;
-  if ((h.sectionBefore ?? '') !== next.sectionBefore) return true;
   if (JSON.stringify(h.levels ?? []) !== JSON.stringify(next.levels)) return true;
   if (JSON.stringify(h.schedule ?? null) !== JSON.stringify(next.schedule ?? null)) return true;
   return false;
@@ -519,14 +525,13 @@ function effectiveLevels(h: Habit): HabitLevel[] {
   return [{ name: h.name, price: h.price ?? DEFAULT_PRICE }, ...(h.levels ?? [])];
 }
 
-// Money earned for a single completed day, honoring levels → bonus → flat price
+// Money earned for a single completed day, honoring levels → flat price
 function priceForDay(h: Habit, ds: string): number {
   if (habitHasLevels(h)) {
     const eff = effectiveLevels(h);
     const idx = Math.min(h.dayLevels?.[ds] ?? 0, eff.length - 1);
     return eff[idx].price;
   }
-  if ((h.bonuses ?? []).includes(ds)) return h.bonusPrice ?? DEFAULT_BONUS_PRICE;
   return h.price ?? DEFAULT_PRICE;
 }
 
@@ -590,13 +595,10 @@ function sanitize(h: Partial<Habit>): Habit {
     completions: Array.isArray(h.completions) ? h.completions.filter(d => typeof d === 'string') : [],
     skips:       Array.isArray(h.skips)       ? h.skips.filter(d => typeof d === 'string')       : [],
     fails:       Array.isArray(h.fails)       ? h.fails.filter(d => typeof d === 'string')       : [],
-    bonuses:     Array.isArray(h.bonuses)     ? h.bonuses.filter(d => typeof d === 'string')     : [],
-    price:       (typeof h.price === 'number'      && isFinite(h.price)      && h.price      >= 0) ? h.price      : undefined,
-    bonusPrice:  (typeof h.bonusPrice === 'number' && isFinite(h.bonusPrice) && h.bonusPrice >= 0) ? h.bonusPrice : undefined,
+    price:       (typeof h.price === 'number' && isFinite(h.price) && h.price >= 0) ? h.price : undefined,
     levels:      sanitizeLevels(h.levels),
     dayLevels:   sanitizeDayLevels(h.dayLevels),
     activeLevel: (typeof h.activeLevel === 'number' && isFinite(h.activeLevel) && h.activeLevel >= 0) ? Math.floor(h.activeLevel) : undefined,
-    sectionBefore: typeof h.sectionBefore === 'string' && h.sectionBefore.trim() ? h.sectionBefore.trim() : undefined,
     schedule:    sanitizeSchedule(h.schedule),
     isBreak:  !!h.isBreak,
     archived: !!h.archived,
@@ -615,12 +617,79 @@ function sanitizeAll(raw: unknown): Habit[] {
   return raw.map(h => sanitize(h as Partial<Habit>));
 }
 
-function loadHabits(): Habit[] {
+function sanitizeSections(raw: unknown): BoardSection[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((s): s is BoardSection =>
+      !!s && typeof s === 'object'
+      && typeof (s as BoardSection).id === 'string'
+      && typeof (s as BoardSection).label === 'string'
+      && (s as BoardSection).label.trim().length > 0,
+    )
+    .map(s => ({ id: s.id, label: s.label.trim() }));
+}
+
+/** Lift legacy `sectionBefore` strings off habits into independent board sections. */
+function boardFromLegacyHabits(rawHabits: unknown): BoardState {
+  if (!Array.isArray(rawHabits)) return { habits: [], sections: [], boardOrder: [] };
+  const sections: BoardSection[] = [];
+  const boardOrder: string[] = [];
+  const habits: Habit[] = [];
+  for (const item of rawHabits) {
+    const partial = (item ?? {}) as Partial<Habit> & { sectionBefore?: unknown };
+    const habit = sanitize(partial);
+    const legacySection = typeof partial.sectionBefore === 'string' && partial.sectionBefore.trim()
+      ? partial.sectionBefore.trim()
+      : '';
+    if (legacySection) {
+      const sid = `sec-${habit.id}`;
+      sections.push({ id: sid, label: legacySection });
+      boardOrder.push(sid);
+    }
+    habits.push(habit);
+    boardOrder.push(habit.id);
+  }
+  return { habits, sections, boardOrder };
+}
+
+function sanitizeBoard(rawHabits: unknown, rawSections: unknown, rawOrder: unknown): BoardState {
+  // If sections/order missing, migrate from legacy habit.sectionBefore
+  if (!Array.isArray(rawSections) && !Array.isArray(rawOrder)) {
+    return boardFromLegacyHabits(rawHabits);
+  }
+  const habits = sanitizeAll(rawHabits);
+  const sections = sanitizeSections(rawSections);
+  const habitIds = new Set(habits.map(h => h.id));
+  const sectionIds = new Set(sections.map(s => s.id));
+  let boardOrder: string[] = [];
+  if (Array.isArray(rawOrder)) {
+    boardOrder = rawOrder.filter((id): id is string =>
+      typeof id === 'string' && (habitIds.has(id) || sectionIds.has(id)),
+    );
+  }
+  // Append anything missing from order
+  for (const s of sections) {
+    if (!boardOrder.includes(s.id)) boardOrder.push(s.id);
+  }
+  for (const h of habits) {
+    if (!boardOrder.includes(h.id)) boardOrder.push(h.id);
+  }
+  // Drop orphaned section refs already filtered; drop unknown ids done above
+  return { habits, sections: sections.filter(s => boardOrder.includes(s.id)), boardOrder };
+}
+
+function loadBoard(): BoardState {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) return sanitizeAll(JSON.parse(raw));
+    if (!raw) return { habits: [], sections: [], boardOrder: [] };
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) return boardFromLegacyHabits(parsed);
+    if (parsed && typeof parsed === 'object' && Array.isArray((parsed as { habits?: unknown }).habits)) {
+      const p = parsed as { habits: unknown; sections?: unknown; boardOrder?: unknown };
+      return sanitizeBoard(p.habits, p.sections, p.boardOrder);
+    }
   } catch { /* noop */ }
-  return [];
+  return { habits: [], sections: [], boardOrder: [] };
 }
 
 // ─── ArchivePanel ─────────────────────────────────────────────────────────────
@@ -837,15 +906,9 @@ function HabitHistoryPanel({ habitName, snapshots, onRestore, onClose }: HabitHi
                   {open && (
                     <div className="habit-snap-body">
                       <div className="habit-snap-row">
-                        <span>Price</span>
+                        <span>Base price</span>
                         <span>${(s.price ?? DEFAULT_PRICE).toFixed(2)}</span>
                       </div>
-                      {(s.bonusPrice != null || !(s.levels?.length)) && (
-                        <div className="habit-snap-row">
-                          <span>Bonus</span>
-                          <span>${(s.bonusPrice ?? DEFAULT_BONUS_PRICE).toFixed(2)}</span>
-                        </div>
-                      )}
                       {levelNames.length > 1 && (
                         <div className="habit-snap-levels">
                           <span className="habit-snap-levels-label">Levels</span>
@@ -869,12 +932,6 @@ function HabitHistoryPanel({ habitName, snapshots, onRestore, onClose }: HabitHi
                             {s.schedule.type === 'weekly' && `Weekdays: ${s.schedule.weekdays.join(',')}`}
                             {s.schedule.type === 'interval' && `Every ${s.schedule.every}d cooldown`}
                           </span>
-                        </div>
-                      )}
-                      {s.sectionBefore && (
-                        <div className="habit-snap-row">
-                          <span>Section</span>
-                          <span>{s.sectionBefore}</span>
                         </div>
                       )}
                       <button
@@ -1022,7 +1079,7 @@ function useAnchoredPosition(
 interface EditPanelProps {
   habit: Habit;
   snapshotCount: number;
-  onSave:     (name: string, color: HabitColor, price: number, bonusPrice: number, sectionBefore: string, levels: HabitLevel[], schedule: HabitSchedule | undefined) => void;
+  onSave:     (name: string, color: HabitColor, price: number, levels: HabitLevel[], schedule: HabitSchedule | undefined) => void;
   onCancel:   () => void;
   onDelete:   () => void;
   onArchive:  () => void;
@@ -1033,15 +1090,12 @@ interface EditPanelProps {
 interface LevelDraft { name: string; price: string; }
 
 function EditPanel({ habit, snapshotCount, onSave, onCancel, onDelete, onArchive, onHistory }: EditPanelProps) {
-
-  const [name,          setName]          = useState(habit.name);
-  const [color,         setColor]         = useState<string>(habit.color);
-  const [price,         setPrice]         = useState<string>(String(habit.price      ?? DEFAULT_PRICE));
-  const [bonusPrice,    setBonusPrice]    = useState<string>(String(habit.bonusPrice ?? DEFAULT_BONUS_PRICE));
-  const [sectionBefore, setSectionBefore] = useState(habit.sectionBefore ?? '');
-  const [levels,        setLevels]        = useState<LevelDraft[]>(
-    (habit.levels ?? []).map(l => ({ name: l.name, price: String(l.price) }))
-  );
+  const [color, setColor] = useState<string>(habit.color);
+  // Levels draft always includes the base level as row 0 (habit name + price).
+  const [levels, setLevels] = useState<LevelDraft[]>(() => [
+    { name: habit.name, price: String(habit.price ?? DEFAULT_PRICE) },
+    ...(habit.levels ?? []).map(l => ({ name: l.name, price: String(l.price) })),
+  ]);
   const [schedType,  setSchedType]  = useState<'daily'|'weekly'|'interval'>(habit.schedule?.type ?? 'daily');
   const [weekdays,   setWeekdays]   = useState<number[]>(
     habit.schedule?.type === 'weekly' ? habit.schedule.weekdays : [1, 2, 3, 4, 5]
@@ -1053,11 +1107,14 @@ function EditPanel({ habit, snapshotCount, onSave, onCancel, onDelete, onArchive
     setWeekdays(ws => ws.includes(d) ? ws.filter(x => x !== d) : [...ws, d]);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const addLevel    = () => setLevels(ls => [...ls, { name: '', price: String(DEFAULT_PRICE) }]);
-  const removeLevel = (idx: number) => setLevels(ls => ls.filter((_, i) => i !== idx));
+  const addLevel = () => setLevels(ls => [...ls, { name: '', price: String(DEFAULT_PRICE) }]);
+  const removeLevel = (idx: number) => setLevels(ls => {
+    if (ls.length <= 1) return ls; // keep at least the base level
+    return ls.filter((_, i) => i !== idx);
+  });
   const updateLevel = (idx: number, patch: Partial<LevelDraft>) =>
     setLevels(ls => ls.map((l, i) => i === idx ? { ...l, ...patch } : l));
-  const moveLevel   = (idx: number, dir: -1 | 1) => setLevels(ls => {
+  const moveLevel = (idx: number, dir: -1 | 1) => setLevels(ls => {
     const j = idx + dir;
     if (j < 0 || j >= ls.length) return ls;
     const next = [...ls];
@@ -1088,17 +1145,15 @@ function EditPanel({ habit, snapshotCount, onSave, onCancel, onDelete, onArchive
   );
 
   const handleSave = () => {
-    const n = name.trim();
-    if (!n) return;
-    const p  = parseFloat(price);
-    const bp = parseFloat(bonusPrice);
-    // Keep only levels with a name; coerce price to a valid number
+    // Keep named levels; first row is the base (habit name + price), rest are extras.
     const cleanLevels: HabitLevel[] = levels
       .filter(l => l.name.trim())
       .map(l => {
         const lp = parseFloat(l.price);
         return { name: l.name.trim(), price: Number.isFinite(lp) && lp >= 0 ? lp : DEFAULT_PRICE };
       });
+    if (cleanLevels.length === 0) return;
+    const [base, ...extras] = cleanLevels;
     // Build schedule (undefined = every day)
     let schedule: HabitSchedule | undefined;
     if (schedType === 'weekly' && weekdays.length > 0) {
@@ -1107,15 +1162,7 @@ function EditPanel({ habit, snapshotCount, onSave, onCancel, onDelete, onArchive
       const every = Math.max(1, Math.floor(parseFloat(intervalEvery) || 1));
       schedule = { type: 'interval', every };
     }
-    onSave(
-      n,
-      color,
-      Number.isFinite(p)  && p  >= 0 ? p  : DEFAULT_PRICE,
-      Number.isFinite(bp) && bp >= 0 ? bp : DEFAULT_BONUS_PRICE,
-      sectionBefore.trim(),
-      cleanLevels,
-      schedule,
-    );
+    onSave(base.name, color, base.price, extras, schedule);
   };
 
   return createPortal(
@@ -1124,14 +1171,6 @@ function EditPanel({ habit, snapshotCount, onSave, onCancel, onDelete, onArchive
       className="edit-panel"
       style={{ top: pos?.top ?? 0, left: pos?.left ?? 0, visibility: pos ? 'visible' : 'hidden' }}
     >
-      <input
-        ref={inputRef}
-        className="edit-panel-input"
-        value={name}
-        onChange={e => setName(e.target.value)}
-        onKeyDown={e => { if (e.key === 'Enter') handleSave(); if (e.key === 'Escape') onCancel(); }}
-        placeholder="Habit name…"
-      />
       <div className="color-pick-row">
         <label className="color-picker-label" title="Pick a color">
           <div className="color-picker-disc" style={{ background: color }} />
@@ -1149,49 +1188,25 @@ function EditPanel({ habit, snapshotCount, onSave, onCancel, onDelete, onArchive
           ))}
         </div>
       </div>
-      <div className="price-row">
-        <label className="price-field">
-          <span className="price-label">Per completion</span>
-          <span className="price-input-wrap">
-            <span className="price-prefix">$</span>
-            <input
-              type="number" min="0" step="0.05" inputMode="decimal"
-              value={price}
-              onChange={e => setPrice(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter') handleSave(); if (e.key === 'Escape') onCancel(); }}
-            />
-          </span>
-        </label>
-        <label className="price-field">
-          <span className="price-label">Middle-click bonus</span>
-          <span className="price-input-wrap">
-            <span className="price-prefix">$</span>
-            <input
-              type="number" min="0" step="0.25" inputMode="decimal"
-              value={bonusPrice}
-              onChange={e => setBonusPrice(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter') handleSave(); if (e.key === 'Escape') onCancel(); }}
-            />
-          </span>
-        </label>
-      </div>
       <div className="levels-editor">
         <div className="levels-editor-head">
           <span className="levels-editor-title">Levels</span>
-          <span className="levels-editor-hint">the habit name + “per completion” price is your base level; add bigger versions below</span>
+          <span className="levels-editor-hint">first row is the base — reorder freely; extras are bigger versions</span>
         </div>
         {levels.map((lvl, i) => (
-          <div className="level-row" key={i}>
+          <div className={`level-row${i === 0 ? ' level-row-base' : ''}`} key={i}>
             <div className="level-move">
               <button className="level-move-btn" onClick={() => moveLevel(i, -1)} disabled={i === 0} title="Move up">▲</button>
               <button className="level-move-btn" onClick={() => moveLevel(i, 1)} disabled={i === levels.length - 1} title="Move down">▼</button>
             </div>
+            {i === 0 && <span className="level-base-tag">Base</span>}
             <input
+              ref={i === 0 ? inputRef : undefined}
               className="level-name-input"
               value={lvl.name}
               onChange={e => updateLevel(i, { name: e.target.value })}
               onKeyDown={e => { if (e.key === 'Enter') handleSave(); if (e.key === 'Escape') onCancel(); }}
-              placeholder={`Level ${i + 1} name…`}
+              placeholder={i === 0 ? 'Base level name…' : `Level ${i + 1} name…`}
             />
             <span className="level-price-wrap">
               <span className="price-prefix">$</span>
@@ -1203,7 +1218,12 @@ function EditPanel({ habit, snapshotCount, onSave, onCancel, onDelete, onArchive
                 onKeyDown={e => { if (e.key === 'Enter') handleSave(); if (e.key === 'Escape') onCancel(); }}
               />
             </span>
-            <button className="level-remove" onClick={() => removeLevel(i)} title="Remove level">✕</button>
+            <button
+              className="level-remove"
+              onClick={() => removeLevel(i)}
+              disabled={levels.length <= 1}
+              title={levels.length <= 1 ? 'Base level required' : 'Remove level'}
+            >✕</button>
           </div>
         ))}
         <button className="level-add" onClick={addLevel}>+ Add level</button>
@@ -1247,19 +1267,6 @@ function EditPanel({ habit, snapshotCount, onSave, onCancel, onDelete, onArchive
             />
             <span>days after completing</span>
           </div>
-        )}
-      </div>
-      <div className="section-label-row">
-        <span className="section-label-prefix">§</span>
-        <input
-          className="section-label-input"
-          value={sectionBefore}
-          onChange={e => setSectionBefore(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter') handleSave(); if (e.key === 'Escape') onCancel(); }}
-          placeholder="Section above this habit (leave blank for none)…"
-        />
-        {sectionBefore && (
-          <button className="section-label-clear" onClick={() => setSectionBefore('')} title="Remove section">✕</button>
         )}
       </div>
       <div className="edit-panel-actions">
@@ -1323,7 +1330,7 @@ function LevelPicker({ habit, onPick, onClose }: LevelPickerProps) {
       style={{ top: pos?.top ?? 0, left: pos?.left ?? 0, visibility: pos ? 'visible' : 'hidden' }}
     >
       <div className="level-picker-head">Active level for <strong>{habit.name}</strong></div>
-      <div className="level-picker-sub">New completions use this level. Middle-click a day for the top level.</div>
+      <div className="level-picker-sub">New completions use this level.</div>
       {levels.map((lvl, i) => (
         <button
           key={i}
@@ -1401,6 +1408,101 @@ function AddPanel({ anchorRef, onAdd, onClose }: {
   );
 }
 
+// ─── SectionRow — independent movable board header ───────────────────────────
+
+interface SectionRowProps {
+  section: BoardSection;
+  editMode: boolean;
+  isDragging: boolean;
+  isDragOver: boolean;
+  onRename: (id: string, label: string) => void;
+  onDelete: (id: string) => void;
+  onDragStartRow: (id: string) => void;
+  onDragOverRow:  (id: string) => void;
+  onDropRow:      (srcId: string, targetId: string) => void;
+  onDragEndRow:   () => void;
+}
+
+const SectionRow = memo(function SectionRow({
+  section, editMode, isDragging, isDragOver,
+  onRename, onDelete, onDragStartRow, onDragOverRow, onDropRow, onDragEndRow,
+}: SectionRowProps) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(section.label);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => { setDraft(section.label); }, [section.label]);
+  useEffect(() => {
+    if (editing) {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    }
+  }, [editing]);
+
+  const commit = () => {
+    const next = draft.trim();
+    if (next && next !== section.label) onRename(section.id, next);
+    else setDraft(section.label);
+    setEditing(false);
+  };
+
+  return (
+    <div
+      className={`section-divider${editMode ? ' section-editable' : ''}${isDragging ? ' dragging' : ''}${isDragOver ? ' drag-over' : ''}`}
+      draggable={editMode && !editing}
+      onDragStart={editMode && !editing ? e => {
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', section.id);
+        onDragStartRow(section.id);
+      } : undefined}
+      onDragEnter={editMode ? e => { e.preventDefault(); onDragOverRow(section.id); } : undefined}
+      onDragOver={editMode ? e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; } : undefined}
+      onDrop={editMode ? e => {
+        e.preventDefault();
+        const src = e.dataTransfer.getData('text/plain');
+        if (src) onDropRow(src, section.id);
+      } : undefined}
+      onDragEnd={editMode ? () => onDragEndRow() : undefined}
+    >
+      {editMode && <span className="drag-grip section-grip" title="Drag to reorder"><GripIcon /></span>}
+      <span className="section-divider-line" />
+      {editing ? (
+        <input
+          ref={inputRef}
+          className="section-divider-input"
+          value={draft}
+          onChange={e => setDraft(e.target.value)}
+          onBlur={commit}
+          onKeyDown={e => {
+            if (e.key === 'Enter') commit();
+            if (e.key === 'Escape') { setDraft(section.label); setEditing(false); }
+          }}
+        />
+      ) : (
+        <button
+          type="button"
+          className="section-divider-label"
+          onClick={editMode ? () => setEditing(true) : undefined}
+          disabled={!editMode}
+          title={editMode ? 'Click to rename' : undefined}
+        >
+          {section.label}
+        </button>
+      )}
+      <span className="section-divider-line" />
+      {editMode && (
+        <button
+          className="section-delete-btn"
+          onClick={() => onDelete(section.id)}
+          title="Delete section"
+        >
+          ✕
+        </button>
+      )}
+    </div>
+  );
+});
+
 // ─── HabitRow ─────────────────────────────────────────────────────────────────
 
 interface RowProps {
@@ -1408,7 +1510,6 @@ interface RowProps {
   dates: Date[];
   isCurrentDay: boolean;
   onToggle:         (id: string, ds: string) => void;
-  onMiddleToggle:   (id: string, ds: string) => void;
   onRightClick:     (id: string, ds: string, rect: DOMRect) => void;
   onCommentHover:   (text: string, ds: string, rect: DOMRect) => void;
   onCommentLeave:   () => void;
@@ -1426,7 +1527,7 @@ interface RowProps {
 }
 
 const HabitRow = memo(function HabitRow(
-  { habit, dates, isCurrentDay, onToggle, onMiddleToggle, onRightClick, onCommentHover, onCommentLeave,
+  { habit, dates, isCurrentDay, onToggle, onRightClick, onCommentHover, onCommentLeave,
     editMode, isEditing, onOpenEdit, onOpenLevelPicker, analyticsView,
     isDragging, isDragOver, onDragStartRow, onDragOverRow, onDropRow, onDragEndRow }: RowProps
 ) {
@@ -1434,7 +1535,6 @@ const HabitRow = memo(function HabitRow(
   const comp  = useMemo(() => new Set(habit.completions), [habit.completions]);
   const skip  = useMemo(() => new Set(habit.skips),       [habit.skips]);
   const fail  = useMemo(() => new Set(habit.fails),       [habit.fails]);
-  const bonus = useMemo(() => new Set(habit.bonuses ?? []), [habit.bonuses]);
   const cur  = useMemo(() => calcCurrentStreak(habit), [habit]);
   const lon  = useMemo(() => calcLongestStreak(habit), [habit]);
   const acc  = getAccent(habit.color);
@@ -1505,7 +1605,6 @@ const HabitRow = memo(function HabitRow(
         const done  = comp.has(ds);
         const skpd  = skip.has(ds);
         const faild = fail.has(ds);
-        const bns   = done && bonus.has(ds);
         const str   = (done || skpd) ? streakAt(habit, ds) : 0;
         const bg    = cellBg(str, habit.color);
         const isTd  = isCurrentDay && i === dates.length - 1;
@@ -1532,13 +1631,9 @@ const HabitRow = memo(function HabitRow(
         return (
           <div
             key={`${habit.id}-${i}`}
-            className={`cell habit-cell${isTd ? ' today-col' : ''}${faild ? ' failed-cell' : ''}${hasComment ? ' has-comment' : ''}${bns ? ' bonus-cell' : ''}${offDay ? ' off-day' : ''}`}
-            style={bns ? undefined : done ? { backgroundColor: bg } : faild ? { '--fail-color': acc } as React.CSSProperties : undefined}
+            className={`cell habit-cell${isTd ? ' today-col' : ''}${faild ? ' failed-cell' : ''}${hasComment ? ' has-comment' : ''}${offDay ? ' off-day' : ''}`}
+            style={done ? { backgroundColor: bg } : faild ? { '--fail-color': acc } as React.CSSProperties : undefined}
             onClick={() => onToggle(habit.id, ds)}
-            onMouseDown={e => { if (e.button === 1) e.preventDefault(); }}
-            onAuxClick={e => {
-              if (e.button === 1) { e.preventDefault(); onMiddleToggle(habit.id, ds); }
-            }}
             onContextMenu={e => {
               e.preventDefault();
               onRightClick(habit.id, ds, (e.currentTarget as HTMLElement).getBoundingClientRect());
@@ -1553,7 +1648,6 @@ const HabitRow = memo(function HabitRow(
             {showLeft  && <div className="cell-skip cell-skip-left"  style={{ background: bg }} />}
             {showRight && <div className="cell-skip cell-skip-right" style={{ background: bg }} />}
             {faild && <div className="cell-fail" />}
-            {bns && <span className="cell-money">$</span>}
             {showLevelBar && (
               <div
                 className="cell-level-bar"
@@ -1620,7 +1714,7 @@ const HabitRow = memo(function HabitRow(
 
 // ─── Daily Progress (gamified) ──────────────────────────────────────────────
 
-interface DayPip { id: string; name: string; color: string; done: boolean; bonus: boolean; earned: number; }
+interface DayPip { id: string; name: string; color: string; done: boolean; earned: number; }
 
 const DailyProgress = memo(function DailyProgress(
   { pips, done, total, viewingToday, daySeed, earned, dayStreak, tools }: {
@@ -1682,12 +1776,10 @@ const DailyProgress = memo(function DailyProgress(
           {pips.map(p => (
             <span
               key={p.id}
-              className={`dp-pip${p.done ? ' filled' : ''}${p.bonus ? ' bonus' : ''}`}
-              style={p.done && !p.bonus ? { background: p.color, boxShadow: `0 0 0 1px ${p.color}` } : undefined}
+              className={`dp-pip${p.done ? ' filled' : ''}`}
+              style={p.done ? { background: p.color, boxShadow: `0 0 0 1px ${p.color}` } : undefined}
               title={`${p.name}${p.done ? ` \u2014 $${p.earned.toFixed(2)}` : ''}`}
-            >
-              {p.bonus ? '$' : ''}
-            </span>
+            />
           ))}
           {total === 0 && <span className="dp-pip-empty">No habits yet</span>}
         </div>
@@ -1772,7 +1864,10 @@ const MoneyMenu = memo(function MoneyMenu(
 // ─── App ──────────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const [habits,         setHabits]         = useState<Habit[]>(loadHabits);
+  const [initialBoard] = useState(loadBoard);
+  const [habits,         setHabits]         = useState<Habit[]>(initialBoard.habits);
+  const [sections,       setSections]       = useState<BoardSection[]>(initialBoard.sections);
+  const [boardOrder,     setBoardOrder]     = useState<string[]>(initialBoard.boardOrder);
   const [offset,         setOffset]         = useState(0);
   const [adding,         setAdding]         = useState(false);
   const [spent,          setSpent]          = useState<number>(loadSpent);
@@ -1804,6 +1899,8 @@ export default function App() {
   const syncTimer    = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isFirstLoad  = useRef(true);
   const habitsRef    = useRef<Habit[]>(habits);
+  const sectionsRef  = useRef<BoardSection[]>(sections);
+  const boardOrderRef = useRef<string[]>(boardOrder);
   const spentRef     = useRef<number>(spent);
   const lastSpendRef = useRef<number>(lastSpend);
   const snapshotsRef = useRef<HabitSnapshot[]>(snapshots);
@@ -1830,10 +1927,18 @@ export default function App() {
 
   const buildPayload = useCallback((): SyncPayload => ({
     habits: habitsRef.current,
+    sections: sectionsRef.current,
+    boardOrder: boardOrderRef.current,
     spent: spentRef.current,
     lastSpend: lastSpendRef.current,
     snapshots: snapshotsRef.current,
   }), []);
+
+  const applyBoard = useCallback((board: BoardState) => {
+    setHabits(board.habits);
+    setSections(board.sections);
+    setBoardOrder(board.boardOrder);
+  }, []);
 
   const spend = useCallback((amt: number) => {
     setSpent(s => Math.max(0, Math.round((s + amt) * 100) / 100));
@@ -1843,7 +1948,7 @@ export default function App() {
 
   // Persist locally + debounce cloud push (silent background — errors shown via dot only)
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(habits));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ habits, sections, boardOrder }));
     if (isFirstLoad.current) return;
     if (!isSyncConfigured()) return;
     if (syncTimer.current) clearTimeout(syncTimer.current);
@@ -1853,7 +1958,7 @@ export default function App() {
         setSyncStatus(result.ok ? 'synced' : 'error');
       });
     }, 1500);
-  }, [habits, buildPayload]);
+  }, [habits, sections, boardOrder, buildPayload]);
 
   // Also push when spent / lastSpend / snapshots change (debounced separately)
   const spentSyncTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1870,10 +1975,12 @@ export default function App() {
 
   useEffect(() => {
     habitsRef.current = habits;
+    sectionsRef.current = sections;
+    boardOrderRef.current = boardOrder;
     spentRef.current = spent;
     lastSpendRef.current = lastSpend;
     snapshotsRef.current = snapshots;
-  }, [habits, spent, lastSpend, snapshots]);
+  }, [habits, sections, boardOrder, spent, lastSpend, snapshots]);
 
   useEffect(() => {
     if (!isSyncConfigured()) return;
@@ -1883,8 +1990,8 @@ export default function App() {
         if (!result.ok) { setSyncStatus('error'); return; }
         const parsed = parseRemotePayload(result.data);
 
-        if (parsed.habits && parsed.habits.length > 0) {
-          setHabits(parsed.habits);
+        if (parsed.board && parsed.board.habits.length > 0) {
+          applyBoard(parsed.board);
           if (parsed.spent !== null) setSpent(parsed.spent);
           if (parsed.lastSpend !== null) setLastSpend(parsed.lastSpend);
           if (parsed.snapshots !== null) setSnapshots(parsed.snapshots);
@@ -1895,7 +2002,7 @@ export default function App() {
         setSyncStatus('synced');
       })
       .finally(() => { isFirstLoad.current = false; });
-  }, [buildPayload]);
+  }, [buildPayload, applyBoard]);
 
 
   // Remove a date key from a dayLevels map (returns undefined if it empties out)
@@ -1912,7 +2019,6 @@ export default function App() {
       const done = h.completions.includes(ds);
       const skpd = h.skips.includes(ds);
       const fail = h.fails.includes(ds);
-      const dropBonus = (h.bonuses ?? []).filter(b => b !== ds);
       const hasLevels = habitHasLevels(h);
       if (!done && !skpd && !fail) {
         // empty → done: record at the habit's active level (index into effective levels)
@@ -1922,60 +2028,43 @@ export default function App() {
         return { ...h, completions: [...h.completions, ds], dayLevels };
       }
       if (done)
-        return { ...h, completions: h.completions.filter(c => c !== ds), skips: [...h.skips, ds], bonuses: dropBonus, dayLevels: dropDayLevel(h.dayLevels, ds) };
+        return { ...h, completions: h.completions.filter(c => c !== ds), skips: [...h.skips, ds], dayLevels: dropDayLevel(h.dayLevels, ds) };
       if (skpd)
         return { ...h, skips: h.skips.filter(s => s !== ds), fails: [...h.fails, ds] };
       return { ...h, fails: h.fails.filter(f => f !== ds) };
     }));
   }, []);
 
-  // Middle-click: complete at the HIGHEST level (or, if no levels, the legacy $1 bonus)
-  const toggleBonus = useCallback((id: string, ds: string) => {
-    setHabits(prev => prev.map(h => {
-      if (h.id !== id) return h;
-      const hasLevels = habitHasLevels(h);
-
-      if (hasLevels) {
-        const topIdx = effectiveLevels(h).length - 1;
-        const alreadyTop = h.completions.includes(ds) && (h.dayLevels?.[ds] ?? 0) === topIdx;
-        if (alreadyTop)
-          // already at top level → clear back to empty
-          return { ...h, completions: h.completions.filter(c => c !== ds), dayLevels: dropDayLevel(h.dayLevels, ds) };
-        return {
-          ...h,
-          completions: h.completions.includes(ds) ? h.completions : [...h.completions, ds],
-          skips: h.skips.filter(s => s !== ds),
-          fails: h.fails.filter(f => f !== ds),
-          dayLevels: { ...(h.dayLevels ?? {}), [ds]: topIdx },
-        };
-      }
-
-      // Legacy behavior: middle-click toggles a $1 bonus completion
-      const bonuses = h.bonuses ?? [];
-      if (bonuses.includes(ds))
-        return { ...h, completions: h.completions.filter(c => c !== ds), bonuses: bonuses.filter(b => b !== ds) };
-      return {
-        ...h,
-        completions: h.completions.includes(ds) ? h.completions : [...h.completions, ds],
-        skips: h.skips.filter(s => s !== ds),
-        fails: h.fails.filter(f => f !== ds),
-        bonuses: [...bonuses, ds],
-      };
-    }));
-  }, []);
-
   const addHabit = useCallback((name: string, color: string) => {
     const n = name.trim();
     if (!n) return;
+    const id = `h-${Date.now()}`;
     setHabits(prev => [...prev, {
-      id: `h-${Date.now()}`, name: n, color,
-      completions: [], skips: [], fails: [], bonuses: [],
+      id, name: n, color,
+      completions: [], skips: [], fails: [],
     }]);
+    setBoardOrder(prev => [...prev, id]);
     setAdding(false);
   }, []);
 
-  const saveEdit = useCallback((name: string, color: HabitColor, price: number, bonusPrice: number, sectionBefore: string, levels: HabitLevel[], schedule: HabitSchedule | undefined) => {
-    const nextVals = { name, color, price, bonusPrice, sectionBefore, levels, schedule };
+  const addSection = useCallback(() => {
+    const id = `sec-${Date.now()}`;
+    const label = 'New section';
+    setSections(prev => [...prev, { id, label }]);
+    setBoardOrder(prev => [...prev, id]);
+  }, []);
+
+  const renameSection = useCallback((id: string, label: string) => {
+    setSections(prev => prev.map(s => s.id === id ? { ...s, label } : s));
+  }, []);
+
+  const deleteSection = useCallback((id: string) => {
+    setSections(prev => prev.filter(s => s.id !== id));
+    setBoardOrder(prev => prev.filter(x => x !== id));
+  }, []);
+
+  const saveEdit = useCallback((name: string, color: HabitColor, price: number, levels: HabitLevel[], schedule: HabitSchedule | undefined) => {
+    const nextVals = { name, color, price, levels, schedule };
     const current = habitsRef.current.find(h => h.id === editingId);
     if (current && defChanged(current, nextVals)) {
       setSnapshots(snaps => [snapshotFromHabit(current), ...snaps]);
@@ -1995,8 +2084,7 @@ export default function App() {
       }
       const activeLevel = hasLevels ? Math.min(h.activeLevel ?? 0, maxIdx) : undefined;
       return {
-        ...h, name, color, price, bonusPrice,
-        sectionBefore: sectionBefore || undefined,
+        ...h, name, color, price,
         levels: hasLevels ? levels : undefined,
         dayLevels,
         activeLevel,
@@ -2029,10 +2117,8 @@ export default function App() {
         name: snap.name,
         color: snap.color,
         price: snap.price,
-        bonusPrice: snap.bonusPrice,
         levels,
         schedule: snap.schedule ? structuredClone(snap.schedule) : undefined,
-        sectionBefore: snap.sectionBefore,
         dayLevels,
         activeLevel: hasLevels ? Math.min(h.activeLevel ?? 0, maxIdx) : undefined,
       };
@@ -2048,7 +2134,9 @@ export default function App() {
 
   const deleteHabit = useCallback(() => {
     if (!window.confirm('Delete this habit?')) return;
-    setHabits(prev => prev.filter(h => h.id !== editingId));
+    const id = editingId;
+    setHabits(prev => prev.filter(h => h.id !== id));
+    if (id) setBoardOrder(prev => prev.filter(x => x !== id));
     setEditingId(null);
   }, [editingId]);
 
@@ -2091,19 +2179,21 @@ export default function App() {
       throw new Error(result.error);
     }
     const parsed = parseRemotePayload(result.data);
-    if (!parsed.habits || parsed.habits.length === 0) {
+    if (!parsed.board || parsed.board.habits.length === 0) {
       setSyncStatus('error');
       const msg = 'That revision has no habits to restore.';
       showToast('error', msg);
       throw new Error(msg);
     }
-    setHabits(parsed.habits);
+    applyBoard(parsed.board);
     if (parsed.spent !== null) setSpent(parsed.spent);
     if (parsed.lastSpend !== null) setLastSpend(parsed.lastSpend);
     if (parsed.snapshots !== null) setSnapshots(parsed.snapshots);
     // Push restored state as the new HEAD so other devices pick it up
     const pushResult = await pushRemote({
-      habits: parsed.habits,
+      habits: parsed.board.habits,
+      sections: parsed.board.sections,
+      boardOrder: parsed.board.boardOrder,
       spent: parsed.spent ?? spentRef.current,
       lastSpend: parsed.lastSpend ?? lastSpendRef.current,
       snapshots: parsed.snapshots ?? snapshotsRef.current,
@@ -2115,31 +2205,33 @@ export default function App() {
     }
     setSyncStatus('synced');
     showToast('success', 'Restored previous cloud version ✓');
-  }, [showToast]);
+  }, [showToast, applyBoard]);
 
   const restoreHabit = useCallback((id: string) => {
     setHabits(prev => prev.map(h => h.id === id ? { ...h, archived: false } : h));
+    setBoardOrder(prev => prev.includes(id) ? prev : [...prev, id]);
   }, []);
 
   const deleteArchivedHabit = useCallback((id: string) => {
     if (!window.confirm('Permanently delete this habit and all its data?')) return;
     setHabits(prev => prev.filter(h => h.id !== id));
+    setBoardOrder(prev => prev.filter(x => x !== id));
   }, []);
 
-  // Drag-and-drop reordering (active in edit mode)
+  // Drag-and-drop reordering for habits and sections (edit mode)
   const handleDragStart = useCallback((id: string) => setDraggingId(id), []);
   const handleDragOver  = useCallback((id: string) => setDragOverId(id), []);
   const handleDragEnd   = useCallback(() => { setDraggingId(null); setDragOverId(null); }, []);
-  const reorderHabit = useCallback((srcId: string, targetId: string) => {
+  const reorderBoardItem = useCallback((srcId: string, targetId: string) => {
     setDraggingId(null); setDragOverId(null);
     if (srcId === targetId) return;
-    setHabits(prev => {
-      const from = prev.findIndex(h => h.id === srcId);
-      const to   = prev.findIndex(h => h.id === targetId);
+    setBoardOrder(prev => {
+      const from = prev.indexOf(srcId);
+      const to   = prev.indexOf(targetId);
       if (from < 0 || to < 0) return prev;
       const next = [...prev];
       const [moved] = next.splice(from, 1);
-      let insertAt = next.findIndex(h => h.id === targetId);
+      let insertAt = next.indexOf(targetId);
       if (from < to) insertAt += 1;   // dropping below → place after target
       next.splice(insertAt, 0, moved);
       return next;
@@ -2183,7 +2275,7 @@ export default function App() {
   }, []);
   const hideCommentTooltip = useCallback(() => setCommentTooltip(null), []);
 
-  // Per-habit pricing: per-level price when levels exist, else bonus/flat price
+  // Per-habit pricing: per-level price when levels exist, else flat price
   const totalMoney = useMemo(() => habits.reduce((sum, h) =>
     sum + h.completions.reduce((s, ds) => s + priceForDay(h, ds), 0),
   0), [habits]);
@@ -2200,7 +2292,6 @@ export default function App() {
       return {
         id: h.id, name: h.name, color: h.color,
         done,
-        bonus: (h.bonuses ?? []).includes(todayStr),
         earned: done ? priceForDay(h, todayStr) : 0,
       };
     }),
@@ -2210,15 +2301,44 @@ export default function App() {
   const todayMoney = todayPips.reduce((s, p) => s + p.earned, 0);
   const dayStreak  = useMemo(() => calcDayStreak(visibleHabits), [visibleHabits]);
 
-  // Rows to render: in edit mode or with the eyeball on, show every habit;
-  // otherwise show only habits due today.
-  const shownHabits = useMemo(
-    () => (editMode || showAllHabits)
-      ? visibleHabits
-      : visibleHabits.filter(h => isScheduledOn(h, todayStr)),
-    [visibleHabits, editMode, showAllHabits, todayStr],
-  );
-  const hiddenCount = visibleHabits.length - shownHabits.length;
+  type BoardRow =
+    | { kind: 'section'; section: BoardSection }
+    | { kind: 'habit'; habit: Habit };
+
+  // Interleaved sections + habits in board order. Habits respect due-today filter.
+  const boardRows = useMemo((): BoardRow[] => {
+    const habitMap = new Map(habits.map(h => [h.id, h]));
+    const secMap = new Map(sections.map(s => [s.id, s]));
+    const showAll = editMode || showAllHabits;
+    const visibleIds = new Set(
+      habits
+        .filter(h => !h.archived && (showAll || isScheduledOn(h, todayStr)))
+        .map(h => h.id),
+    );
+    const rows: BoardRow[] = [];
+    for (let i = 0; i < boardOrder.length; i++) {
+      const id = boardOrder[i];
+      const sec = secMap.get(id);
+      if (sec) {
+        const hasVisibleBelow = (() => {
+          for (let j = i + 1; j < boardOrder.length; j++) {
+            if (secMap.has(boardOrder[j])) break;
+            if (visibleIds.has(boardOrder[j])) return true;
+          }
+          return false;
+        })();
+        if (showAll || hasVisibleBelow) rows.push({ kind: 'section', section: sec });
+        continue;
+      }
+      if (visibleIds.has(id)) {
+        const h = habitMap.get(id);
+        if (h) rows.push({ kind: 'habit', habit: h });
+      }
+    }
+    return rows;
+  }, [habits, sections, boardOrder, editMode, showAllHabits, todayStr]);
+  const shownHabitCount = boardRows.filter(r => r.kind === 'habit').length;
+  const hiddenCount = visibleHabits.length - shownHabitCount;
   // Stable per-day seed so "start"/"victory" quotes vary day to day.
   const daySeed = useMemo(() => {
     const d = todayNoon();
@@ -2234,30 +2354,36 @@ export default function App() {
     : `${wName}px repeat(${daysBack + 1}, ${wDay}px) repeat(${statCount}, ${wStat}px)`;
 
   const exportData = useCallback(() => {
-    const blob = new Blob([JSON.stringify(habits, null, 2)], { type: 'application/json' });
+    const blob = new Blob([JSON.stringify({ habits, sections, boardOrder }, null, 2)], { type: 'application/json' });
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');
     a.href = url;
     a.download = `everyday-${fmt(todayNoon())}.json`;
     a.click();
     URL.revokeObjectURL(url);
-  }, [habits]);
+  }, [habits, sections, boardOrder]);
 
   const importData = useCallback((file: File) => {
     const reader = new FileReader();
     reader.onload = e => {
       try {
         const parsed = JSON.parse(e.target?.result as string);
-        const clean  = sanitizeAll(parsed);
-        if (clean.length === 0) throw new Error('No valid habits found in this file.');
-        const ok = window.confirm(`Replace your current data with ${clean.length} habits from this file?`);
-        if (ok) setHabits(clean);
+        const board = Array.isArray(parsed)
+          ? boardFromLegacyHabits(parsed)
+          : sanitizeBoard(
+              (parsed as { habits?: unknown }).habits ?? parsed,
+              (parsed as { sections?: unknown }).sections,
+              (parsed as { boardOrder?: unknown }).boardOrder,
+            );
+        if (board.habits.length === 0) throw new Error('No valid habits found in this file.');
+        const ok = window.confirm(`Replace your current data with ${board.habits.length} habits from this file?`);
+        if (ok) applyBoard(board);
       } catch {
         alert('Could not read this file. Make sure it\'s a valid Everyday export.');
       }
     };
     reader.readAsText(file);
-  }, []);
+  }, [applyBoard]);
 
   const editingHabit = editingId ? visibleHabits.find(h => h.id === editingId) : null;
   const levelPickerHabit = levelPickerId ? visibleHabits.find(h => h.id === levelPickerId) : null;
@@ -2403,48 +2529,61 @@ export default function App() {
               </div>
             ))}
 
-            {/* ─ Habit rows (active only) ─ */}
-            {shownHabits.map(habit => (
-              <Fragment key={habit.id}>
-                {habit.sectionBefore && (
-                  <div className="section-divider">
-                    <span className="section-divider-label">{habit.sectionBefore}</span>
-                  </div>
-                )}
+            {/* ─ Board rows: sections + habits ─ */}
+            {boardRows.map(row => row.kind === 'section' ? (
+              <SectionRow
+                key={row.section.id}
+                section={row.section}
+                editMode={editMode}
+                isDragging={draggingId === row.section.id}
+                isDragOver={dragOverId === row.section.id && draggingId !== row.section.id}
+                onRename={renameSection}
+                onDelete={deleteSection}
+                onDragStartRow={handleDragStart}
+                onDragOverRow={handleDragOver}
+                onDropRow={reorderBoardItem}
+                onDragEndRow={handleDragEnd}
+              />
+            ) : (
               <HabitRow
-                key={habit.id}
-                habit={habit}
+                key={row.habit.id}
+                habit={row.habit}
                 dates={dates}
                 isCurrentDay={isCurrentDay}
                 onToggle={toggle}
-                onMiddleToggle={toggleBonus}
                 onRightClick={openComment}
                 onCommentHover={showCommentTooltip}
                 onCommentLeave={hideCommentTooltip}
                 editMode={editMode}
-                isEditing={editingId === habit.id}
-                onOpenEdit={() => openEdit(habit.id)}
+                isEditing={editingId === row.habit.id}
+                onOpenEdit={() => openEdit(row.habit.id)}
                 onOpenLevelPicker={openLevelPicker}
                 analyticsView={analyticsView}
-                isDragging={draggingId === habit.id}
-                isDragOver={dragOverId === habit.id && draggingId !== habit.id}
+                isDragging={draggingId === row.habit.id}
+                isDragOver={dragOverId === row.habit.id && draggingId !== row.habit.id}
                 onDragStartRow={handleDragStart}
                 onDragOverRow={handleDragOver}
-                onDropRow={reorderHabit}
+                onDropRow={reorderBoardItem}
                 onDragEndRow={handleDragEnd}
               />
-              </Fragment>
             ))}
 
             {/* ─ Footer ─ */}
             <div className="cell footer-name">
-              <button
-                ref={addBtnRef}
-                className={`add-btn${adding ? ' active' : ''}`}
-                onClick={() => setAdding(a => !a)}
-              >
-                <span className="add-plus">+</span> New Habit
-              </button>
+              <div className="footer-add-row">
+                <button
+                  ref={addBtnRef}
+                  className={`add-btn${adding ? ' active' : ''}`}
+                  onClick={() => setAdding(a => !a)}
+                >
+                  <span className="add-plus">+</span> New Habit
+                </button>
+                {editMode && (
+                  <button className="add-section-btn" onClick={addSection} title="Add a section header">
+                    § Section
+                  </button>
+                )}
+              </div>
             </div>
 
             {dates.map((d, i) => {
