@@ -3,7 +3,9 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import './App.css';
-import type { Habit, HabitColor, HabitLevel, HabitSchedule, HabitSnapshot, BoardSection } from './types';
+import type {
+  Habit, HabitColor, HabitLevel, HabitSchedule, HabitSnapshot, BoardSection, BoardTemplate,
+} from './types';
 import {
   fetchRemote, pushRemote, isSyncConfigured,
   listGistCommits, fetchRevision, type GistCommit,
@@ -84,6 +86,9 @@ const STORAGE_KEY    = 'everyday-habits-v2';
 const SPENT_KEY      = 'everyday-spent-v1';
 const LAST_SPEND_KEY = 'everyday-last-spend-v1';
 const SNAPSHOTS_KEY  = 'everyday-snapshots-v1';
+const TEMPLATE_OVERRIDE_KEY = 'everyday-template-override-v1';
+const WEEKDAY_LABELS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+const WEEKDAY_NAMES  = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
 function loadSpent(): number {
   try {
@@ -123,6 +128,8 @@ interface SyncPayload {
   habits: Habit[];
   sections?: BoardSection[];
   boardOrder?: string[];
+  templates?: BoardTemplate[];
+  activeTemplateId?: string | null;
   spent: number;
   lastSpend?: number;
   snapshots?: HabitSnapshot[];
@@ -132,6 +139,8 @@ interface BoardState {
   habits: Habit[];
   sections: BoardSection[];
   boardOrder: string[];
+  templates: BoardTemplate[];
+  activeTemplateId: string | null;
 }
 
 function parseRemotePayload(raw: unknown): {
@@ -150,12 +159,14 @@ function parseRemotePayload(raw: unknown): {
     habits?: unknown;
     sections?: unknown;
     boardOrder?: unknown;
+    templates?: unknown;
+    activeTemplateId?: unknown;
     spent?: unknown;
     lastSpend?: unknown;
     snapshots?: unknown;
   };
   const board = Array.isArray(obj.habits)
-    ? sanitizeBoard(obj.habits, obj.sections, obj.boardOrder)
+    ? sanitizeBoard(obj.habits, obj.sections, obj.boardOrder, obj.templates, obj.activeTemplateId)
     : null;
   const spent = typeof obj.spent === 'number' && Number.isFinite(obj.spent) ? Math.max(0, obj.spent) : null;
   const lastSpend = typeof obj.lastSpend === 'number' && Number.isFinite(obj.lastSpend)
@@ -172,6 +183,20 @@ function parseRemotePayload(raw: unknown): {
     );
   }
   return { board, spent, lastSpend, snapshots };
+}
+
+function loadTemplateOverrideDate(): string | null {
+  try {
+    const raw = localStorage.getItem(TEMPLATE_OVERRIDE_KEY);
+    return raw && /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : null;
+  } catch { return null; }
+}
+
+function saveTemplateOverrideDate(ds: string | null) {
+  try {
+    if (ds) localStorage.setItem(TEMPLATE_OVERRIDE_KEY, ds);
+    else localStorage.removeItem(TEMPLATE_OVERRIDE_KEY);
+  } catch { /* noop */ }
 }
 
 function snapshotFromHabit(h: Habit): HabitSnapshot {
@@ -629,9 +654,35 @@ function sanitizeSections(raw: unknown): BoardSection[] {
     .map(s => ({ id: s.id, label: s.label.trim() }));
 }
 
+function sanitizeTemplates(raw: unknown): BoardTemplate[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((t): t is BoardTemplate =>
+      !!t && typeof t === 'object'
+      && typeof (t as BoardTemplate).id === 'string'
+      && typeof (t as BoardTemplate).name === 'string'
+      && (t as BoardTemplate).name.trim().length > 0
+      && Array.isArray((t as BoardTemplate).boardOrder)
+      && Array.isArray((t as BoardTemplate).sections),
+    )
+    .map(t => ({
+      id: t.id,
+      name: t.name.trim(),
+      boardOrder: t.boardOrder.filter((id): id is string => typeof id === 'string'),
+      sections: sanitizeSections(t.sections),
+      weekdays: Array.isArray(t.weekdays)
+        ? [...new Set(t.weekdays.filter((d): d is number => typeof d === 'number' && d >= 0 && d <= 6))]
+        : [],
+    }));
+}
+
+function emptyBoard(): BoardState {
+  return { habits: [], sections: [], boardOrder: [], templates: [], activeTemplateId: null };
+}
+
 /** Lift legacy `sectionBefore` strings off habits into independent board sections. */
 function boardFromLegacyHabits(rawHabits: unknown): BoardState {
-  if (!Array.isArray(rawHabits)) return { habits: [], sections: [], boardOrder: [] };
+  if (!Array.isArray(rawHabits)) return emptyBoard();
   const sections: BoardSection[] = [];
   const boardOrder: string[] = [];
   const habits: Habit[] = [];
@@ -649,13 +700,24 @@ function boardFromLegacyHabits(rawHabits: unknown): BoardState {
     habits.push(habit);
     boardOrder.push(habit.id);
   }
-  return { habits, sections, boardOrder };
+  return { habits, sections, boardOrder, templates: [], activeTemplateId: null };
 }
 
-function sanitizeBoard(rawHabits: unknown, rawSections: unknown, rawOrder: unknown): BoardState {
+function sanitizeBoard(
+  rawHabits: unknown,
+  rawSections: unknown,
+  rawOrder: unknown,
+  rawTemplates?: unknown,
+  rawActiveId?: unknown,
+): BoardState {
   // If sections/order missing, migrate from legacy habit.sectionBefore
   if (!Array.isArray(rawSections) && !Array.isArray(rawOrder)) {
-    return boardFromLegacyHabits(rawHabits);
+    const legacy = boardFromLegacyHabits(rawHabits);
+    return {
+      ...legacy,
+      templates: sanitizeTemplates(rawTemplates),
+      activeTemplateId: typeof rawActiveId === 'string' ? rawActiveId : null,
+    };
   }
   const habits = sanitizeAll(rawHabits);
   const sections = sanitizeSections(rawSections);
@@ -674,22 +736,80 @@ function sanitizeBoard(rawHabits: unknown, rawSections: unknown, rawOrder: unkno
   for (const h of habits) {
     if (!boardOrder.includes(h.id)) boardOrder.push(h.id);
   }
+  const templates = sanitizeTemplates(rawTemplates);
+  const activeTemplateId = typeof rawActiveId === 'string' && templates.some(t => t.id === rawActiveId)
+    ? rawActiveId
+    : null;
   // Drop orphaned section refs already filtered; drop unknown ids done above
-  return { habits, sections: sections.filter(s => boardOrder.includes(s.id)), boardOrder };
+  return {
+    habits,
+    sections: sections.filter(s => boardOrder.includes(s.id)),
+    boardOrder,
+    templates,
+    activeTemplateId,
+  };
+}
+
+/** Compute layout from a template against current habits/sections. */
+function layoutFromTemplate(
+  template: BoardTemplate,
+  habits: Habit[],
+  liveSections: BoardSection[],
+): { boardOrder: string[]; sections: BoardSection[] } {
+  const habitIds = new Set(habits.map(h => h.id));
+  const secById = new Map(liveSections.map(s => [s.id, s]));
+  for (const ts of template.sections) {
+    const existing = secById.get(ts.id);
+    if (existing) secById.set(ts.id, { ...existing, label: ts.label });
+    else secById.set(ts.id, { id: ts.id, label: ts.label });
+  }
+  const sections = [...secById.values()];
+  const sectionIds = new Set(sections.map(s => s.id));
+  const boardOrder = template.boardOrder.filter(id => habitIds.has(id) || sectionIds.has(id));
+  for (const s of sections) {
+    if (!boardOrder.includes(s.id)) boardOrder.push(s.id);
+  }
+  for (const h of habits) {
+    if (!boardOrder.includes(h.id)) boardOrder.push(h.id);
+  }
+  return { boardOrder, sections };
+}
+
+function snapshotTemplateFromBoard(
+  name: string,
+  boardOrder: string[],
+  sections: BoardSection[],
+  weekdays: number[] = [],
+): BoardTemplate {
+  const secMap = new Map(sections.map(s => [s.id, s]));
+  const orderSecs = boardOrder
+    .map(id => secMap.get(id))
+    .filter((s): s is BoardSection => !!s)
+    .map(s => ({ id: s.id, label: s.label }));
+  return {
+    id: `tpl-${Date.now()}`,
+    name: name.trim() || 'Untitled',
+    boardOrder: [...boardOrder],
+    sections: orderSecs,
+    weekdays: [...weekdays],
+  };
 }
 
 function loadBoard(): BoardState {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { habits: [], sections: [], boardOrder: [] };
+    if (!raw) return emptyBoard();
     const parsed = JSON.parse(raw);
     if (Array.isArray(parsed)) return boardFromLegacyHabits(parsed);
     if (parsed && typeof parsed === 'object' && Array.isArray((parsed as { habits?: unknown }).habits)) {
-      const p = parsed as { habits: unknown; sections?: unknown; boardOrder?: unknown };
-      return sanitizeBoard(p.habits, p.sections, p.boardOrder);
+      const p = parsed as {
+        habits: unknown; sections?: unknown; boardOrder?: unknown;
+        templates?: unknown; activeTemplateId?: unknown;
+      };
+      return sanitizeBoard(p.habits, p.sections, p.boardOrder, p.templates, p.activeTemplateId);
     }
   } catch { /* noop */ }
-  return { habits: [], sections: [], boardOrder: [] };
+  return emptyBoard();
 }
 
 // ─── ArchivePanel ─────────────────────────────────────────────────────────────
@@ -741,6 +861,220 @@ function ArchivePanel({ archivedHabits, onRestore, onDelete, onClose }: ArchiveP
                 </button>
               </li>
             ))}
+          </ul>
+        )}
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+// ─── TemplatePicker — header dropdown to select a board template ─────────────
+
+interface TemplatePickerProps {
+  templates: BoardTemplate[];
+  activeTemplateId: string | null;
+  onSelect: (id: string) => void;
+  onManage: () => void;
+}
+
+const TemplatePicker = memo(function TemplatePicker({
+  templates, activeTemplateId, onSelect, onManage,
+}: TemplatePickerProps) {
+  const [open, setOpen] = useState(false);
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const active = templates.find(t => t.id === activeTemplateId) ?? null;
+
+  const openNow = () => { if (closeTimer.current) clearTimeout(closeTimer.current); setOpen(true); };
+  const closeSoon = () => { closeTimer.current = setTimeout(() => setOpen(false), 220); };
+
+  const weekdayHint = (t: BoardTemplate) => {
+    if (!t.weekdays.length) return 'Manual';
+    return t.weekdays.map(d => WEEKDAY_LABELS[d]).join('');
+  };
+
+  return (
+    <div className="tpl-picker-wrap" onMouseEnter={openNow} onMouseLeave={closeSoon}>
+      <button
+        type="button"
+        className={`tpl-picker-btn${active ? ' has-active' : ''}`}
+        onClick={() => setOpen(o => !o)}
+        title="Board templates"
+      >
+        <LayoutIcon />
+        <span className="tpl-picker-label">{active?.name ?? 'Template'}</span>
+        <span className="tpl-picker-caret">▾</span>
+      </button>
+      {open && (
+        <div className="tpl-picker-menu" onMouseEnter={openNow} onMouseLeave={closeSoon}>
+          {templates.length === 0 ? (
+            <p className="tpl-picker-empty">No templates yet. Save one in edit mode.</p>
+          ) : (
+            <ul className="tpl-picker-list">
+              {templates.map(t => (
+                <li key={t.id}>
+                  <button
+                    type="button"
+                    className={`tpl-picker-item${t.id === activeTemplateId ? ' active' : ''}`}
+                    onClick={() => { onSelect(t.id); setOpen(false); }}
+                  >
+                    <span className="tpl-picker-item-name">{t.name}</span>
+                    <span className="tpl-picker-item-days">{weekdayHint(t)}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          <button
+            type="button"
+            className="tpl-picker-manage"
+            onClick={() => { setOpen(false); onManage(); }}
+          >
+            Manage templates…
+          </button>
+        </div>
+      )}
+    </div>
+  );
+});
+
+// ─── TemplatesManagePanel — create / rename / weekdays / delete ───────────────
+
+interface TemplatesManagePanelProps {
+  templates: BoardTemplate[];
+  activeTemplateId: string | null;
+  onClose: () => void;
+  onRename: (id: string, name: string) => void;
+  onSetWeekdays: (id: string, weekdays: number[]) => void;
+  onDelete: (id: string) => void;
+  onApply: (id: string) => void;
+  onSaveCurrent: (name: string, weekdays: number[]) => void;
+}
+
+function TemplatesManagePanel({
+  templates, activeTemplateId, onClose,
+  onRename, onSetWeekdays, onDelete, onApply, onSaveCurrent,
+}: TemplatesManagePanelProps) {
+  const [newName, setNewName] = useState('');
+  const [newDays, setNewDays] = useState<number[]>([]);
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [onClose]);
+
+  const claimedBy = (day: number, exceptId?: string) =>
+    templates.find(t => t.id !== exceptId && t.weekdays.includes(day));
+
+  const toggleNewDay = (d: number) =>
+    setNewDays(prev => prev.includes(d) ? prev.filter(x => x !== d) : [...prev, d].sort((a, b) => a - b));
+
+  const saveNew = () => {
+    const n = newName.trim();
+    if (!n) return;
+    onSaveCurrent(n, newDays);
+    setNewName('');
+    setNewDays([]);
+  };
+
+  return createPortal(
+    <div className="archive-overlay" onClick={onClose}>
+      <div className="archive-panel tpl-manage-panel" onClick={e => e.stopPropagation()}>
+        <div className="archive-panel-header">
+          <div className="archive-panel-title-group">
+            <LayoutIcon />
+            <span className="archive-panel-title">Board templates</span>
+          </div>
+          <button className="archive-close-btn" onClick={onClose}>✕</button>
+        </div>
+        <p className="history-hint">
+          Templates save habit order and section headers. Assign weekdays to auto-apply each morning — or pick one from the dropdown anytime.
+        </p>
+
+        <div className="tpl-save-box">
+          <span className="tpl-save-title">Save current board as template</span>
+          <input
+            className="tpl-name-input"
+            placeholder="e.g. Weekend"
+            value={newName}
+            onChange={e => setNewName(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') saveNew(); }}
+          />
+          <div className="tpl-weekday-row">
+            {WEEKDAY_LABELS.map((lbl, d) => {
+              const clash = claimedBy(d);
+              return (
+                <button
+                  key={d}
+                  type="button"
+                  className={`tpl-day${newDays.includes(d) ? ' on' : ''}${clash ? ' clash' : ''}`}
+                  title={clash ? `Also used by “${clash.name}” — saving will take it` : WEEKDAY_NAMES[d]}
+                  onClick={() => toggleNewDay(d)}
+                >{lbl}</button>
+              );
+            })}
+          </div>
+          <button className="btn-save" onClick={saveNew} disabled={!newName.trim()}>
+            Save template
+          </button>
+        </div>
+
+        {templates.length === 0 ? (
+          <p className="archive-empty">No templates yet.</p>
+        ) : (
+          <ul className="archive-list tpl-manage-list">
+            {templates.map(t => {
+              const overlap = t.weekdays
+                .map(d => claimedBy(d, t.id))
+                .filter(Boolean) as BoardTemplate[];
+              return (
+                <li key={t.id} className={`tpl-manage-item${t.id === activeTemplateId ? ' is-active' : ''}`}>
+                  <input
+                    className="tpl-name-input"
+                    value={t.name}
+                    onChange={e => onRename(t.id, e.target.value)}
+                  />
+                  <div className="tpl-weekday-row">
+                    {WEEKDAY_LABELS.map((lbl, d) => {
+                      const clash = claimedBy(d, t.id);
+                      return (
+                        <button
+                          key={d}
+                          type="button"
+                          className={`tpl-day${t.weekdays.includes(d) ? ' on' : ''}${clash ? ' clash' : ''}`}
+                          title={clash ? `Also used by “${clash.name}”` : WEEKDAY_NAMES[d]}
+                          onClick={() => {
+                            const next = t.weekdays.includes(d)
+                              ? t.weekdays.filter(x => x !== d)
+                              : [...t.weekdays, d].sort((a, b) => a - b);
+                            onSetWeekdays(t.id, next);
+                          }}
+                        >{lbl}</button>
+                      );
+                    })}
+                  </div>
+                  {overlap.length > 0 && (
+                    <p className="tpl-overlap-warn">
+                      Overlaps {overlap.map(o => o.name).join(', ')} — first match wins each day.
+                    </p>
+                  )}
+                  <div className="tpl-manage-actions">
+                    <button className="btn-restore" onClick={() => onApply(t.id)}>Apply now</button>
+                    <button
+                      className="btn-delete-perm"
+                      onClick={() => {
+                        if (!window.confirm(`Delete template “${t.name}”?`)) return;
+                        onDelete(t.id);
+                      }}
+                      title="Delete template"
+                    >
+                      <TrashIcon />
+                    </button>
+                  </div>
+                </li>
+              );
+            })}
           </ul>
         )}
       </div>
@@ -1868,6 +2202,10 @@ export default function App() {
   const [habits,         setHabits]         = useState<Habit[]>(initialBoard.habits);
   const [sections,       setSections]       = useState<BoardSection[]>(initialBoard.sections);
   const [boardOrder,     setBoardOrder]     = useState<string[]>(initialBoard.boardOrder);
+  const [templates,      setTemplates]      = useState<BoardTemplate[]>(initialBoard.templates);
+  const [activeTemplateId, setActiveTemplateId] = useState<string | null>(initialBoard.activeTemplateId);
+  const [templateOverrideDate, setTemplateOverrideDate] = useState<string | null>(loadTemplateOverrideDate);
+  const [showTemplates,  setShowTemplates]  = useState(false);
   const [offset,         setOffset]         = useState(0);
   const [adding,         setAdding]         = useState(false);
   const [spent,          setSpent]          = useState<number>(loadSpent);
@@ -1901,6 +2239,8 @@ export default function App() {
   const habitsRef    = useRef<Habit[]>(habits);
   const sectionsRef  = useRef<BoardSection[]>(sections);
   const boardOrderRef = useRef<string[]>(boardOrder);
+  const templatesRef = useRef<BoardTemplate[]>(templates);
+  const activeTemplateIdRef = useRef<string | null>(activeTemplateId);
   const spentRef     = useRef<number>(spent);
   const lastSpendRef = useRef<number>(lastSpend);
   const snapshotsRef = useRef<HabitSnapshot[]>(snapshots);
@@ -1924,11 +2264,16 @@ export default function App() {
     localStorage.setItem(SNAPSHOTS_KEY, JSON.stringify(snapshots));
     snapshotsRef.current = snapshots;
   }, [snapshots]);
+  useEffect(() => {
+    saveTemplateOverrideDate(templateOverrideDate);
+  }, [templateOverrideDate]);
 
   const buildPayload = useCallback((): SyncPayload => ({
     habits: habitsRef.current,
     sections: sectionsRef.current,
     boardOrder: boardOrderRef.current,
+    templates: templatesRef.current,
+    activeTemplateId: activeTemplateIdRef.current,
     spent: spentRef.current,
     lastSpend: lastSpendRef.current,
     snapshots: snapshotsRef.current,
@@ -1938,6 +2283,59 @@ export default function App() {
     setHabits(board.habits);
     setSections(board.sections);
     setBoardOrder(board.boardOrder);
+    setTemplates(board.templates);
+    setActiveTemplateId(board.activeTemplateId);
+  }, []);
+
+  const applyTemplateById = useCallback((id: string, asOverride: boolean) => {
+    const tpl = templatesRef.current.find(t => t.id === id);
+    if (!tpl) return;
+    const layout = layoutFromTemplate(tpl, habitsRef.current, sectionsRef.current);
+    setSections(layout.sections);
+    setBoardOrder(layout.boardOrder);
+    setActiveTemplateId(tpl.id);
+    if (asOverride) {
+      const today = fmt(todayNoon());
+      setTemplateOverrideDate(today);
+    }
+  }, []);
+
+  const saveCurrentAsTemplate = useCallback((name: string, weekdays: number[]) => {
+    const tpl = snapshotTemplateFromBoard(
+      name,
+      boardOrderRef.current,
+      sectionsRef.current,
+      weekdays,
+    );
+    // Claiming weekdays removes them from other templates
+    setTemplates(prev => {
+      const cleared = prev.map(t => ({
+        ...t,
+        weekdays: t.weekdays.filter(d => !weekdays.includes(d)),
+      }));
+      return [...cleared, tpl];
+    });
+    setActiveTemplateId(tpl.id);
+    showToast('success', `Saved template “${tpl.name}”`);
+  }, [showToast]);
+
+  const renameTemplate = useCallback((id: string, name: string) => {
+    const n = name.trim();
+    if (!n) return;
+    setTemplates(prev => prev.map(t => t.id === id ? { ...t, name: n } : t));
+  }, []);
+
+  const setTemplateWeekdays = useCallback((id: string, weekdays: number[]) => {
+    setTemplates(prev => prev.map(t => {
+      if (t.id === id) return { ...t, weekdays };
+      // Steal claimed days from others
+      return { ...t, weekdays: t.weekdays.filter(d => !weekdays.includes(d)) };
+    }));
+  }, []);
+
+  const deleteTemplate = useCallback((id: string) => {
+    setTemplates(prev => prev.filter(t => t.id !== id));
+    setActiveTemplateId(cur => cur === id ? null : cur);
   }, []);
 
   const spend = useCallback((amt: number) => {
@@ -1948,7 +2346,9 @@ export default function App() {
 
   // Persist locally + debounce cloud push (silent background — errors shown via dot only)
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ habits, sections, boardOrder }));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      habits, sections, boardOrder, templates, activeTemplateId,
+    }));
     if (isFirstLoad.current) return;
     if (!isSyncConfigured()) return;
     if (syncTimer.current) clearTimeout(syncTimer.current);
@@ -1958,7 +2358,7 @@ export default function App() {
         setSyncStatus(result.ok ? 'synced' : 'error');
       });
     }, 1500);
-  }, [habits, sections, boardOrder, buildPayload]);
+  }, [habits, sections, boardOrder, templates, activeTemplateId, buildPayload]);
 
   // Also push when spent / lastSpend / snapshots change (debounced separately)
   const spentSyncTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1977,10 +2377,12 @@ export default function App() {
     habitsRef.current = habits;
     sectionsRef.current = sections;
     boardOrderRef.current = boardOrder;
+    templatesRef.current = templates;
+    activeTemplateIdRef.current = activeTemplateId;
     spentRef.current = spent;
     lastSpendRef.current = lastSpend;
     snapshotsRef.current = snapshots;
-  }, [habits, sections, boardOrder, spent, lastSpend, snapshots]);
+  }, [habits, sections, boardOrder, templates, activeTemplateId, spent, lastSpend, snapshots]);
 
   useEffect(() => {
     if (!isSyncConfigured()) return;
@@ -2194,6 +2596,8 @@ export default function App() {
       habits: parsed.board.habits,
       sections: parsed.board.sections,
       boardOrder: parsed.board.boardOrder,
+      templates: parsed.board.templates,
+      activeTemplateId: parsed.board.activeTemplateId,
       spent: parsed.spent ?? spentRef.current,
       lastSpend: parsed.lastSpend ?? lastSpendRef.current,
       snapshots: parsed.snapshots ?? snapshotsRef.current,
@@ -2286,6 +2690,20 @@ export default function App() {
   // Today's progress (always real "today", regardless of which day is in view).
   // Only habits actually due today count toward the ring / pips.
   const todayStr = fmt(todayNoon());
+
+  // Auto-apply weekday template each calendar day (manual dropdown overrides today).
+  useEffect(() => {
+    if (templateOverrideDate === todayStr) return;
+    if (templateOverrideDate && templateOverrideDate !== todayStr) {
+      setTemplateOverrideDate(null);
+    }
+    const dow = todayNoon().getDay();
+    const match = templates.find(t => t.weekdays.includes(dow));
+    if (!match) return;
+    if (match.id === activeTemplateId) return;
+    applyTemplateById(match.id, false);
+  }, [todayStr, templates, templateOverrideDate, activeTemplateId, applyTemplateById]);
+
   const todayPips = useMemo(
     () => visibleHabits.filter(h => isScheduledOn(h, todayStr)).map(h => {
       const done = h.completions.includes(todayStr);
@@ -2354,14 +2772,16 @@ export default function App() {
     : `${wName}px repeat(${daysBack + 1}, ${wDay}px) repeat(${statCount}, ${wStat}px)`;
 
   const exportData = useCallback(() => {
-    const blob = new Blob([JSON.stringify({ habits, sections, boardOrder }, null, 2)], { type: 'application/json' });
+    const blob = new Blob([JSON.stringify({
+      habits, sections, boardOrder, templates, activeTemplateId,
+    }, null, 2)], { type: 'application/json' });
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');
     a.href = url;
     a.download = `everyday-${fmt(todayNoon())}.json`;
     a.click();
     URL.revokeObjectURL(url);
-  }, [habits, sections, boardOrder]);
+  }, [habits, sections, boardOrder, templates, activeTemplateId]);
 
   const importData = useCallback((file: File) => {
     const reader = new FileReader();
@@ -2374,6 +2794,8 @@ export default function App() {
               (parsed as { habits?: unknown }).habits ?? parsed,
               (parsed as { sections?: unknown }).sections,
               (parsed as { boardOrder?: unknown }).boardOrder,
+              (parsed as { templates?: unknown }).templates,
+              (parsed as { activeTemplateId?: unknown }).activeTemplateId,
             );
         if (board.habits.length === 0) throw new Error('No valid habits found in this file.');
         const ok = window.confirm(`Replace your current data with ${board.habits.length} habits from this file?`);
@@ -2476,6 +2898,12 @@ export default function App() {
             <div className="cell ch habits-header">
               <span className="habits-label">HABITS</span>
               <div className="habits-header-actions">
+                <TemplatePicker
+                  templates={templates}
+                  activeTemplateId={activeTemplateId}
+                  onSelect={id => applyTemplateById(id, true)}
+                  onManage={() => setShowTemplates(true)}
+                />
                 {editMode && archivedHabits.length > 0 && (
                   <button
                     className="archive-count-btn"
@@ -2579,9 +3007,29 @@ export default function App() {
                   <span className="add-plus">+</span> New Habit
                 </button>
                 {editMode && (
-                  <button className="add-section-btn" onClick={addSection} title="Add a section header">
-                    § Section
-                  </button>
+                  <>
+                    <button className="add-section-btn" onClick={addSection} title="Add a section header">
+                      § Section
+                    </button>
+                    <button
+                      className="add-section-btn"
+                      onClick={() => {
+                        const name = window.prompt('Template name', 'Weekend');
+                        if (!name?.trim()) return;
+                        saveCurrentAsTemplate(name.trim(), []);
+                      }}
+                      title="Save current board order as a template"
+                    >
+                      Save template
+                    </button>
+                    <button
+                      className="add-section-btn"
+                      onClick={() => setShowTemplates(true)}
+                      title="Manage board templates"
+                    >
+                      Templates…
+                    </button>
+                  </>
                 )}
               </div>
             </div>
@@ -2647,6 +3095,20 @@ export default function App() {
           onRestore={restoreHabit}
           onDelete={deleteArchivedHabit}
           onClose={() => setShowArchive(false)}
+        />
+      )}
+
+      {/* ── Board templates manager ── */}
+      {showTemplates && (
+        <TemplatesManagePanel
+          templates={templates}
+          activeTemplateId={activeTemplateId}
+          onClose={() => setShowTemplates(false)}
+          onRename={renameTemplate}
+          onSetWeekdays={setTemplateWeekdays}
+          onDelete={deleteTemplate}
+          onApply={id => { applyTemplateById(id, true); setShowTemplates(false); }}
+          onSaveCurrent={saveCurrentAsTemplate}
         />
       )}
 
@@ -2782,6 +3244,15 @@ function SlidersIcon() {
       <line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/>
       <line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/>
       <line x1="17" y1="16" x2="23" y2="16"/>
+    </svg>
+  );
+}
+function LayoutIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="3" y="3" width="18" height="18" rx="2"/>
+      <path d="M3 9h18M9 21V9"/>
     </svg>
   );
 }

@@ -19,6 +19,15 @@ export interface BoardSection {
   label: string;
 }
 
+/** Named snapshot of board layout (habit + section order) with optional weekday defaults. */
+export interface BoardTemplate {
+  id: string;
+  name: string;
+  boardOrder: string[];      // habit + section ids
+  sections: BoardSection[];  // label snapshot for section ids in this template
+  weekdays: number[];        // 0=Sun … 6=Sat; empty = manual-only
+}
+
 export interface Habit {
   id: string;
   name: string;
