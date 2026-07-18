@@ -264,12 +264,12 @@ interface Layout {
 
 function getLayout(width: number): Layout {
   if (width < 640) {
-    return { daysBack: 5, wName: 100, wDay: 30, wToday: 50, wStat: 38, rowH: 44, isMobile: true };
+    return { daysBack: 5, wName: 118, wDay: 30, wToday: 50, wStat: 38, rowH: 44, isMobile: true };
   }
   if (width < 900) {
-    return { daysBack: 9, wName: 130, wDay: 38, wToday: 70, wStat: 46, rowH: 42, isMobile: false };
+    return { daysBack: 9, wName: 168, wDay: 38, wToday: 70, wStat: 46, rowH: 42, isMobile: false };
   }
-  return { daysBack: 13, wName: 175, wDay: 46, wToday: 90, wStat: 52, rowH: 42, isMobile: false };
+  return { daysBack: 13, wName: 220, wDay: 46, wToday: 90, wStat: 52, rowH: 42, isMobile: false };
 }
 
 // ─── Analytics helpers ────────────────────────────────────────────────────────
@@ -372,6 +372,8 @@ function useViewportWidth(): number {
 // Completions count; skips and off-schedule days are transparent (don't break,
 // don't count). A due day that was failed or left empty breaks the chain.
 
+type DueFn = (h: Habit, ds: string) => boolean;
+
 function streakEarliest(h: Habit): string | null {
   let earliest: string | null = null;
   for (const ds of [...h.completions, ...h.skips]) {
@@ -381,7 +383,7 @@ function streakEarliest(h: Habit): string | null {
 }
 
 /** Streak of completions ending on `ds` (must be a completed or skipped day). */
-function streakAt(h: Habit, ds: string): number {
+function streakAt(h: Habit, ds: string, isDue: DueFn = isScheduledOn): number {
   const comp = new Set(h.completions);
   const skip = new Set(h.skips);
   const fail = new Set(h.fails);
@@ -398,8 +400,8 @@ function streakAt(h: Habit, ds: string): number {
       // transparent
     } else if (fail.has(s)) {
       break;
-    } else if (!isScheduledOn(h, s)) {
-      // off-day (rest / not due) — transparent
+    } else if (!isDue(h, s)) {
+      // off-day / board-disabled — transparent
     } else {
       break; // due but empty
     }
@@ -408,7 +410,7 @@ function streakAt(h: Habit, ds: string): number {
   return n;
 }
 
-function calcCurrentStreak(h: Habit): number {
+function calcCurrentStreak(h: Habit, isDue: DueFn = isScheduledOn): number {
   const comp = new Set(h.completions);
   const skip = new Set(h.skips);
   const fail = new Set(h.fails);
@@ -427,8 +429,8 @@ function calcCurrentStreak(h: Habit): number {
       // transparent
     } else if (fail.has(s)) {
       break;
-    } else if (!isScheduledOn(h, s)) {
-      // off-day — transparent
+    } else if (!isDue(h, s)) {
+      // off-day / board-disabled — transparent
     } else if (s === today) {
       // grace: today is still in progress
     } else {
@@ -439,7 +441,7 @@ function calcCurrentStreak(h: Habit): number {
   return n;
 }
 
-function calcLongestStreak(h: Habit): number {
+function calcLongestStreak(h: Habit, isDue: DueFn = isScheduledOn): number {
   const comp = new Set(h.completions);
   const skip = new Set(h.skips);
   const fail = new Set(h.fails);
@@ -460,8 +462,8 @@ function calcLongestStreak(h: Habit): number {
       // transparent
     } else if (fail.has(s)) {
       cur = 0;
-    } else if (!isScheduledOn(h, s)) {
-      // off-day — transparent
+    } else if (!isDue(h, s)) {
+      // off-day / board-disabled — transparent
     } else if (s === today) {
       // today still open — don't wipe the run
     } else {
@@ -475,7 +477,7 @@ function calcLongestStreak(h: Habit): number {
 // Consecutive days (ending today, or yesterday if today isn't finished yet) on
 // which every habit DUE that day was completed or skipped. Skips don't break it,
 // and days where nothing is scheduled are neutral (don't break, don't count).
-function calcDayStreak(habits: Habit[]): number {
+function calcDayStreak(habits: Habit[], isDue: DueFn = isScheduledOn): number {
   if (habits.length === 0) return 0;
   const comp = new Map<string, Set<string>>();
   const skip = new Map<string, Set<string>>();
@@ -491,7 +493,7 @@ function calcDayStreak(habits: Habit[]): number {
 
   // 'ok' = all due done/skipped, 'fail' = something due missed, 'none' = nothing due
   const dayState = (ds: string): 'ok' | 'fail' | 'none' => {
-    const due = habits.filter(h => isScheduledOn(h, ds));
+    const due = habits.filter(h => isDue(h, ds));
     if (due.length === 0) return 'none';
     return due.every(h => comp.get(h.id)!.has(ds) || skip.get(h.id)!.has(ds)) ? 'ok' : 'fail';
   };
@@ -654,6 +656,23 @@ function sanitizeSections(raw: unknown): BoardSection[] {
     .map(s => ({ id: s.id, label: s.label.trim() }));
 }
 
+function sanitizeHabitLevels(raw: unknown): Record<string, number> | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const out: Record<string, number> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof k === 'string' && typeof v === 'number' && isFinite(v) && v >= 0) {
+      out[k] = Math.floor(v);
+    }
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+function sanitizeDisabledIds(raw: unknown): string[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const ids = raw.filter((id): id is string => typeof id === 'string' && id.length > 0);
+  return ids.length ? [...new Set(ids)] : undefined;
+}
+
 function sanitizeTemplates(raw: unknown): BoardTemplate[] {
   if (!Array.isArray(raw)) return [];
   return raw
@@ -673,6 +692,8 @@ function sanitizeTemplates(raw: unknown): BoardTemplate[] {
       weekdays: Array.isArray(t.weekdays)
         ? [...new Set(t.weekdays.filter((d): d is number => typeof d === 'number' && d >= 0 && d <= 6))]
         : [],
+      habitLevels: sanitizeHabitLevels((t as BoardTemplate).habitLevels),
+      disabledHabitIds: sanitizeDisabledIds((t as BoardTemplate).disabledHabitIds),
     }));
 }
 
@@ -779,20 +800,78 @@ function snapshotTemplateFromBoard(
   name: string,
   boardOrder: string[],
   sections: BoardSection[],
+  habits: Habit[],
   weekdays: number[] = [],
+  disabledHabitIds: string[] = [],
 ): BoardTemplate {
   const secMap = new Map(sections.map(s => [s.id, s]));
   const orderSecs = boardOrder
     .map(id => secMap.get(id))
     .filter((s): s is BoardSection => !!s)
     .map(s => ({ id: s.id, label: s.label }));
+  const habitLevels: Record<string, number> = {};
+  for (const h of habits) {
+    if (!boardOrder.includes(h.id)) continue;
+    if (!habitHasLevels(h)) continue;
+    habitLevels[h.id] = h.activeLevel ?? 0;
+  }
+  const disabled = disabledHabitIds.filter(id => habits.some(h => h.id === id));
   return {
     id: `tpl-${Date.now()}`,
     name: name.trim() || 'Untitled',
     boardOrder: [...boardOrder],
     sections: orderSecs,
     weekdays: [...weekdays],
+    habitLevels: Object.keys(habitLevels).length ? habitLevels : undefined,
+    disabledHabitIds: disabled.length ? disabled : undefined,
   };
+}
+
+/** Which board template governs a given calendar date (for disable rules / levels). */
+function templateForDate(
+  templates: BoardTemplate[],
+  ds: string,
+  todayStr: string,
+  activeTemplateId: string | null,
+  overrideDate: string | null,
+): BoardTemplate | null {
+  if (ds === todayStr) {
+    if (overrideDate === todayStr && activeTemplateId) {
+      return templates.find(t => t.id === activeTemplateId) ?? null;
+    }
+    const dow = new Date(ds + 'T12:00:00').getDay();
+    return templates.find(t => t.weekdays.includes(dow))
+      ?? (activeTemplateId ? templates.find(t => t.id === activeTemplateId) ?? null : null);
+  }
+  const dow = new Date(ds + 'T12:00:00').getDay();
+  return templates.find(t => t.weekdays.includes(dow)) ?? null;
+}
+
+function makeIsDue(
+  templates: BoardTemplate[],
+  todayStr: string,
+  activeTemplateId: string | null,
+  overrideDate: string | null,
+): DueFn {
+  return (h, ds) => {
+    if (h.archived) return false;
+    const tpl = templateForDate(templates, ds, todayStr, activeTemplateId, overrideDate);
+    if (tpl?.disabledHabitIds?.includes(h.id)) return false;
+    return isScheduledOn(h, ds);
+  };
+}
+
+/** Habit ids under a section until the next section in board order. */
+function habitIdsInSection(boardOrder: string[], sectionId: string, habitIds: Set<string>): string[] {
+  const start = boardOrder.indexOf(sectionId);
+  if (start < 0) return [];
+  const out: string[] = [];
+  for (let i = start + 1; i < boardOrder.length; i++) {
+    const id = boardOrder[i];
+    if (!habitIds.has(id)) break; // next section
+    out.push(id);
+  }
+  return out;
 }
 
 function loadBoard(): BoardState {
@@ -1749,8 +1828,10 @@ interface SectionRowProps {
   editMode: boolean;
   isDragging: boolean;
   isDragOver: boolean;
+  canDisableForBoard: boolean;
   onRename: (id: string, label: string) => void;
   onDelete: (id: string) => void;
+  onDisableHabits: (id: string) => void;
   onDragStartRow: (id: string) => void;
   onDragOverRow:  (id: string) => void;
   onDropRow:      (srcId: string, targetId: string) => void;
@@ -1758,8 +1839,8 @@ interface SectionRowProps {
 }
 
 const SectionRow = memo(function SectionRow({
-  section, editMode, isDragging, isDragOver,
-  onRename, onDelete, onDragStartRow, onDragOverRow, onDropRow, onDragEndRow,
+  section, editMode, isDragging, isDragOver, canDisableForBoard,
+  onRename, onDelete, onDisableHabits, onDragStartRow, onDragOverRow, onDropRow, onDragEndRow,
 }: SectionRowProps) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(section.label);
@@ -1825,13 +1906,31 @@ const SectionRow = memo(function SectionRow({
       )}
       <span className="section-divider-line" />
       {editMode && (
-        <button
-          className="section-delete-btn"
-          onClick={() => onDelete(section.id)}
-          title="Delete section"
-        >
-          ✕
-        </button>
+        <div className="section-actions">
+          <button
+            className="section-edit-btn"
+            onClick={() => setEditing(true)}
+            title="Edit section name"
+          >
+            <PencilIcon />
+          </button>
+          {canDisableForBoard && (
+            <button
+              className="section-disable-btn"
+              onClick={() => onDisableHabits(section.id)}
+              title="Disable habits in this section on the current board"
+            >
+              <EyeOffIcon />
+            </button>
+          )}
+          <button
+            className="section-delete-btn"
+            onClick={() => onDelete(section.id)}
+            title="Delete section"
+          >
+            ✕
+          </button>
+        </div>
       )}
     </div>
   );
@@ -1843,10 +1942,14 @@ interface RowProps {
   habit: Habit;
   dates: Date[];
   isCurrentDay: boolean;
+  isDue: DueFn;
+  boardDisabled: boolean;
+  canToggleBoardDisable: boolean;
   onToggle:         (id: string, ds: string) => void;
   onRightClick:     (id: string, ds: string, rect: DOMRect) => void;
   onCommentHover:   (text: string, ds: string, rect: DOMRect) => void;
   onCommentLeave:   () => void;
+  onToggleBoardDisable: (id: string) => void;
   editMode: boolean;
   isEditing: boolean;
   onOpenEdit: () => void;
@@ -1861,7 +1964,8 @@ interface RowProps {
 }
 
 const HabitRow = memo(function HabitRow(
-  { habit, dates, isCurrentDay, onToggle, onRightClick, onCommentHover, onCommentLeave,
+  { habit, dates, isCurrentDay, isDue, boardDisabled, canToggleBoardDisable,
+    onToggle, onRightClick, onCommentHover, onCommentLeave, onToggleBoardDisable,
     editMode, isEditing, onOpenEdit, onOpenLevelPicker, analyticsView,
     isDragging, isDragOver, onDragStartRow, onDragOverRow, onDropRow, onDragEndRow }: RowProps
 ) {
@@ -1869,8 +1973,8 @@ const HabitRow = memo(function HabitRow(
   const comp  = useMemo(() => new Set(habit.completions), [habit.completions]);
   const skip  = useMemo(() => new Set(habit.skips),       [habit.skips]);
   const fail  = useMemo(() => new Set(habit.fails),       [habit.fails]);
-  const cur  = useMemo(() => calcCurrentStreak(habit), [habit]);
-  const lon  = useMemo(() => calcLongestStreak(habit), [habit]);
+  const cur  = useMemo(() => calcCurrentStreak(habit, isDue), [habit, isDue]);
+  const lon  = useMemo(() => calcLongestStreak(habit, isDue), [habit, isDue]);
   const acc  = getAccent(habit.color);
   const doneToday = comp.has(fmt(todayNoon()));   // completed for today?
   const urgeMax   = lon > 0 && cur >= lon && !doneToday; // at record run but today not done yet
@@ -1879,7 +1983,7 @@ const HabitRow = memo(function HabitRow(
   const levels      = useMemo(() => effectiveLevels(habit), [habit]); // base + extras
   const dayLevels   = habit.dayLevels ?? {};
   // Sidebar name is clickable (to pick level) only in non-edit mode with levels defined
-  const nameClickable = hasLevels && !editMode;
+  const nameClickable = hasLevels && !editMode && !boardDisabled;
   const activeLevelIdx = Math.min(habit.activeLevel ?? 0, Math.max(0, levels.length - 1));
   const displayName = hasLevels ? levels[activeLevelIdx].name : habit.name;
 
@@ -1895,7 +1999,7 @@ const HabitRow = memo(function HabitRow(
       <div
         ref={nameRef}
         data-hid={habit.id}
-        className={`cell habit-name${isEditing ? ' editing' : ''}${editMode ? ' draggable' : ''}${isDragging ? ' dragging' : ''}${isDragOver ? ' drag-over' : ''}`}
+        className={`cell habit-name${isEditing ? ' editing' : ''}${editMode ? ' draggable' : ''}${isDragging ? ' dragging' : ''}${isDragOver ? ' drag-over' : ''}${boardDisabled ? ' board-disabled' : ''}`}
         draggable={editMode}
         onDragStart={editMode ? e => {
           e.dataTransfer.effectAllowed = 'move';
@@ -1921,16 +2025,29 @@ const HabitRow = memo(function HabitRow(
             <span className="habit-name-text">{displayName}</span>
           </button>
         ) : (
-          <span className="habit-name-text">{displayName}</span>
+          <span className="habit-name-text" title={boardDisabled ? 'Disabled on this board' : undefined}>
+            {displayName}
+          </span>
         )}
         {editMode && (
-          <button
-            className="edit-icon-btn"
-            onClick={() => onOpenEdit()}
-            title="Edit habit"
-          >
-            <PencilIcon />
-          </button>
+          <>
+            {canToggleBoardDisable && (
+              <button
+                className={`board-disable-btn${boardDisabled ? ' is-off' : ''}`}
+                onClick={() => onToggleBoardDisable(habit.id)}
+                title={boardDisabled ? 'Enable on this board' : 'Disable on this board (keeps streak)'}
+              >
+                {boardDisabled ? <EyeOffIcon /> : <EyeIcon />}
+              </button>
+            )}
+            <button
+              className="edit-icon-btn"
+              onClick={() => onOpenEdit()}
+              title="Edit habit"
+            >
+              <PencilIcon />
+            </button>
+          </>
         )}
       </div>
 
@@ -1939,7 +2056,7 @@ const HabitRow = memo(function HabitRow(
         const done  = comp.has(ds);
         const skpd  = skip.has(ds);
         const faild = fail.has(ds);
-        const str   = (done || skpd) ? streakAt(habit, ds) : 0;
+        const str   = (done || skpd) ? streakAt(habit, ds, isDue) : 0;
         const bg    = cellBg(str, habit.color);
         const isTd  = isCurrentDay && i === dates.length - 1;
 
@@ -1959,8 +2076,8 @@ const HabitRow = memo(function HabitRow(
         const showLevelBar = done && hasLevels && dayLvl >= 1;
         const levelFrac = showLevelBar ? (dayLvl + 1) / levels.length : 0;
 
-        // Off-day: this habit isn't scheduled on this date and nothing's logged.
-        const offDay = !done && !skpd && !faild && !isScheduledOn(habit, ds);
+        // Off-day: not due on this board/schedule and nothing's logged.
+        const offDay = !done && !skpd && !faild && !isDue(habit, ds);
 
         return (
           <div
@@ -2294,18 +2411,29 @@ export default function App() {
     setSections(layout.sections);
     setBoardOrder(layout.boardOrder);
     setActiveTemplateId(tpl.id);
+    if (tpl.habitLevels && Object.keys(tpl.habitLevels).length) {
+      setHabits(prev => prev.map(h => {
+        if (!habitHasLevels(h)) return h;
+        const lvl = tpl.habitLevels![h.id];
+        if (lvl == null || typeof lvl !== 'number') return h;
+        const max = effectiveLevels(h).length - 1;
+        return { ...h, activeLevel: Math.min(Math.max(0, Math.floor(lvl)), max) };
+      }));
+    }
     if (asOverride) {
-      const today = fmt(todayNoon());
-      setTemplateOverrideDate(today);
+      setTemplateOverrideDate(fmt(todayNoon()));
     }
   }, []);
 
   const saveCurrentAsTemplate = useCallback((name: string, weekdays: number[]) => {
+    const active = templatesRef.current.find(t => t.id === activeTemplateIdRef.current);
     const tpl = snapshotTemplateFromBoard(
       name,
       boardOrderRef.current,
       sectionsRef.current,
+      habitsRef.current,
       weekdays,
+      active?.disabledHabitIds ?? [],
     );
     // Claiming weekdays removes them from other templates
     setTemplates(prev => {
@@ -2317,6 +2445,42 @@ export default function App() {
     });
     setActiveTemplateId(tpl.id);
     showToast('success', `Saved template “${tpl.name}”`);
+  }, [showToast]);
+
+  const toggleBoardDisable = useCallback((habitId: string) => {
+    const tid = activeTemplateIdRef.current;
+    if (!tid) {
+      showToast('error', 'Select or save a board template first');
+      return;
+    }
+    setTemplates(prev => prev.map(t => {
+      if (t.id !== tid) return t;
+      const set = new Set(t.disabledHabitIds ?? []);
+      if (set.has(habitId)) set.delete(habitId);
+      else set.add(habitId);
+      const disabledHabitIds = [...set];
+      return { ...t, disabledHabitIds: disabledHabitIds.length ? disabledHabitIds : undefined };
+    }));
+  }, [showToast]);
+
+  const disableSectionHabits = useCallback((sectionId: string) => {
+    const tid = activeTemplateIdRef.current;
+    if (!tid) {
+      showToast('error', 'Select or save a board template first');
+      return;
+    }
+    const habitIdSet = new Set(habitsRef.current.map(h => h.id));
+    const ids = habitIdsInSection(boardOrderRef.current, sectionId, habitIdSet);
+    if (!ids.length) return;
+    setTemplates(prev => prev.map(t => {
+      if (t.id !== tid) return t;
+      const set = new Set(t.disabledHabitIds ?? []);
+      const allOff = ids.every(id => set.has(id));
+      if (allOff) ids.forEach(id => set.delete(id));
+      else ids.forEach(id => set.add(id));
+      const disabledHabitIds = [...set];
+      return { ...t, disabledHabitIds: disabledHabitIds.length ? disabledHabitIds : undefined };
+    }));
   }, [showToast]);
 
   const renameTemplate = useCallback((id: string, name: string) => {
@@ -2529,9 +2693,16 @@ export default function App() {
     showToast('success', 'Habit restored from snapshot');
   }, [showToast]);
 
-  // Set the currently-active level for a habit (used for new completions)
+  // Set the currently-active level for a habit (used for new completions).
+  // Also remember it on the active board template (e.g. lower level on weekends).
   const setActiveLevel = useCallback((id: string, level: number) => {
     setHabits(prev => prev.map(h => h.id === id ? { ...h, activeLevel: level } : h));
+    const tid = activeTemplateIdRef.current;
+    if (!tid) return;
+    setTemplates(prev => prev.map(t => {
+      if (t.id !== tid) return t;
+      return { ...t, habitLevels: { ...t.habitLevels, [id]: level } };
+    }));
   }, []);
 
   const deleteHabit = useCallback(() => {
@@ -2691,6 +2862,16 @@ export default function App() {
   // Only habits actually due today count toward the ring / pips.
   const todayStr = fmt(todayNoon());
 
+  const isDue = useMemo(
+    () => makeIsDue(templates, todayStr, activeTemplateId, templateOverrideDate),
+    [templates, todayStr, activeTemplateId, templateOverrideDate],
+  );
+
+  const activeDisabled = useMemo(() => {
+    const tpl = templates.find(t => t.id === activeTemplateId);
+    return new Set(tpl?.disabledHabitIds ?? []);
+  }, [templates, activeTemplateId]);
+
   // Auto-apply weekday template each calendar day (manual dropdown overrides today).
   useEffect(() => {
     if (templateOverrideDate === todayStr) return;
@@ -2705,7 +2886,7 @@ export default function App() {
   }, [todayStr, templates, templateOverrideDate, activeTemplateId, applyTemplateById]);
 
   const todayPips = useMemo(
-    () => visibleHabits.filter(h => isScheduledOn(h, todayStr)).map(h => {
+    () => visibleHabits.filter(h => isDue(h, todayStr)).map(h => {
       const done = h.completions.includes(todayStr);
       return {
         id: h.id, name: h.name, color: h.color,
@@ -2713,24 +2894,26 @@ export default function App() {
         earned: done ? priceForDay(h, todayStr) : 0,
       };
     }),
-    [visibleHabits, todayStr],
+    [visibleHabits, todayStr, isDue],
   );
   const todayDone  = todayPips.filter(p => p.done).length;
   const todayMoney = todayPips.reduce((s, p) => s + p.earned, 0);
-  const dayStreak  = useMemo(() => calcDayStreak(visibleHabits), [visibleHabits]);
+  const dayStreak  = useMemo(() => calcDayStreak(visibleHabits, isDue), [visibleHabits, isDue]);
 
   type BoardRow =
     | { kind: 'section'; section: BoardSection }
     | { kind: 'habit'; habit: Habit };
 
-  // Interleaved sections + habits in board order. Habits respect due-today filter.
+  // Interleaved sections + habits in board order. Habits respect due-today filter
+  // (schedule + board disables). Edit / show-all reveals disabled habits so they
+  // can be toggled back on.
   const boardRows = useMemo((): BoardRow[] => {
     const habitMap = new Map(habits.map(h => [h.id, h]));
     const secMap = new Map(sections.map(s => [s.id, s]));
     const showAll = editMode || showAllHabits;
     const visibleIds = new Set(
       habits
-        .filter(h => !h.archived && (showAll || isScheduledOn(h, todayStr)))
+        .filter(h => !h.archived && (showAll || isDue(h, todayStr)))
         .map(h => h.id),
     );
     const rows: BoardRow[] = [];
@@ -2754,7 +2937,7 @@ export default function App() {
       }
     }
     return rows;
-  }, [habits, sections, boardOrder, editMode, showAllHabits, todayStr]);
+  }, [habits, sections, boardOrder, editMode, showAllHabits, todayStr, isDue]);
   const shownHabitCount = boardRows.filter(r => r.kind === 'habit').length;
   const hiddenCount = visibleHabits.length - shownHabitCount;
   // Stable per-day seed so "start"/"victory" quotes vary day to day.
@@ -2965,8 +3148,10 @@ export default function App() {
                 editMode={editMode}
                 isDragging={draggingId === row.section.id}
                 isDragOver={dragOverId === row.section.id && draggingId !== row.section.id}
+                canDisableForBoard={!!activeTemplateId}
                 onRename={renameSection}
                 onDelete={deleteSection}
+                onDisableHabits={disableSectionHabits}
                 onDragStartRow={handleDragStart}
                 onDragOverRow={handleDragOver}
                 onDropRow={reorderBoardItem}
@@ -2978,10 +3163,14 @@ export default function App() {
                 habit={row.habit}
                 dates={dates}
                 isCurrentDay={isCurrentDay}
+                isDue={isDue}
+                boardDisabled={activeDisabled.has(row.habit.id)}
+                canToggleBoardDisable={!!activeTemplateId}
                 onToggle={toggle}
                 onRightClick={openComment}
                 onCommentHover={showCommentTooltip}
                 onCommentLeave={hideCommentTooltip}
+                onToggleBoardDisable={toggleBoardDisable}
                 editMode={editMode}
                 isEditing={editingId === row.habit.id}
                 onOpenEdit={() => openEdit(row.habit.id)}

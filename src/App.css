@@ -291,18 +291,25 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 6px;
-  padding: 8px 10px 8px 16px;
+  gap: 4px;
+  padding: 8px 8px 8px 12px;
   border-right: 1px solid #e2e8f0;
   position: sticky;
   left: 0;
   background: #fff;
   z-index: 3;
+  overflow: hidden;
+  min-width: 0;
+  box-sizing: border-box;
 }
 .habits-header-actions {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 3px;
+  min-width: 0;
+  flex: 1;
+  justify-content: flex-end;
+  overflow: hidden;
 }
 .archive-count-btn {
   display: flex;
@@ -311,13 +318,14 @@ body {
   background: none;
   border: 1px solid #e2e8f0;
   border-radius: 5px;
-  padding: 3px 6px;
+  padding: 3px 5px;
   font-size: 10px;
   font-weight: 700;
   font-family: inherit;
   color: #94a3b8;
   cursor: pointer;
   transition: background 0.1s, color 0.1s, border-color 0.1s;
+  flex-shrink: 0;
 }
 .archive-count-btn:hover {
   background: #fef3c7;
@@ -329,6 +337,7 @@ body {
   font-weight: 700;
   letter-spacing: 0.12em;
   color: #94a3b8;
+  flex-shrink: 0;
 }
 .edit-mode-btn {
   background: none;
@@ -430,12 +439,26 @@ body {
   outline: none;
   background: #fff;
 }
-.section-delete-btn {
-  background: none; border: none; cursor: pointer;
-  color: #cbd5e1; font-size: 12px; padding: 2px 4px; line-height: 1;
+.section-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
   flex-shrink: 0;
 }
-.section-delete-btn:hover { color: #ef4444; }
+.section-edit-btn,
+.section-disable-btn,
+.section-delete-btn {
+  background: none; border: none; cursor: pointer;
+  color: #cbd5e1; font-size: 12px; padding: 3px 4px; line-height: 1;
+  flex-shrink: 0; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center;
+  transition: color 0.1s, background 0.1s;
+}
+.section-edit-btn:hover { color: #2563eb; background: #eff6ff; }
+.section-disable-btn:hover { color: #b45309; background: #fffbeb; }
+.section-delete-btn:hover { color: #ef4444; background: #fef2f2; }
+.section-edit-btn svg,
+.section-disable-btn svg { width: 12px; height: 12px; }
 
 /* ─── Habit name column ───────────────────────────────────────────────────── */
 .habit-name {
@@ -481,8 +504,28 @@ body {
   opacity: 0;
 }
 .habit-name:hover .edit-icon-btn,
-.habit-name.editing .edit-icon-btn { opacity: 1; }
+.habit-name.editing .edit-icon-btn,
+.habit-name.draggable .edit-icon-btn,
+.habit-name.draggable .board-disable-btn { opacity: 1; }
 .edit-icon-btn:hover { color: #2563eb; background: #eff6ff; }
+
+.board-disable-btn {
+  background: none; border: none; cursor: pointer;
+  color: #94a3b8; padding: 3px; display: flex; align-items: center;
+  border-radius: 3px; flex-shrink: 0;
+  transition: color 0.1s, background 0.1s;
+  opacity: 0;
+}
+.board-disable-btn:hover { color: #b45309; background: #fffbeb; }
+.board-disable-btn.is-off { opacity: 1; color: #d97706; }
+.board-disable-btn svg { width: 13px; height: 13px; }
+
+.habit-name.board-disabled .habit-name-text {
+  color: #94a3b8;
+  text-decoration: line-through;
+  text-decoration-color: #cbd5e1;
+}
+.habit-name.board-disabled { background: #f8fafc; }
 
 /* ─── Drag-and-drop reordering (edit mode) ───────────────────────────────── */
 .drag-grip {
@@ -1404,14 +1447,17 @@ body {
 .tpl-picker-wrap {
   position: relative;
   display: inline-flex;
+  min-width: 0;
+  flex-shrink: 1;
 }
 .tpl-picker-btn {
-  display: inline-flex; align-items: center; gap: 4px;
+  display: inline-flex; align-items: center; gap: 3px;
   background: none; border: 1px solid #e2e8f0; border-radius: 5px;
-  padding: 3px 7px; cursor: pointer;
+  padding: 3px 6px; cursor: pointer;
   font-size: 10px; font-weight: 700; font-family: inherit;
-  color: #94a3b8; max-width: 120px;
+  color: #94a3b8; max-width: 100%;
   transition: background 0.1s, color 0.1s, border-color 0.1s;
+  min-width: 0;
 }
 .tpl-picker-btn:hover,
 .tpl-picker-btn.has-active {
@@ -1419,7 +1465,7 @@ body {
 }
 .tpl-picker-label {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  max-width: 72px;
+  max-width: 64px;
 }
 .tpl-picker-caret { font-size: 9px; opacity: 0.7; }
 .tpl-picker-menu {
@@ -1529,11 +1575,12 @@ body {
   .board-scroll { padding: 12px 8px 16px; }
   .board-center { border-radius: 8px; }
 
-  .habits-header { padding: 6px 6px 6px 10px; }
-  .habits-label  { font-size: 9px; letter-spacing: 0.08em; }
+  .habits-header { padding: 6px 4px 6px 8px; }
+  .habits-label  { display: none; }
   .edit-mode-btn, .eye-btn { width: 24px; height: 22px; }
   .tpl-picker-label { display: none; }
   .tpl-picker-btn { max-width: none; padding: 3px 5px; }
+  .board-disable-btn { opacity: 1; }
 
   .habit-name {
     padding: 0 4px 0 10px;

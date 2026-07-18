@@ -26,6 +26,10 @@ export interface BoardTemplate {
   boardOrder: string[];      // habit + section ids
   sections: BoardSection[];  // label snapshot for section ids in this template
   weekdays: number[];        // 0=Sun … 6=Sat; empty = manual-only
+  /** habitId → activeLevel index to restore when this board is applied */
+  habitLevels?: Record<string, number>;
+  /** Habits inactive on this board (hidden; don't break streaks) */
+  disabledHabitIds?: string[];
 }
 
 export interface Habit {
