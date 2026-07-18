@@ -1061,12 +1061,13 @@ interface TemplatesManagePanelProps {
   onSetWeekdays: (id: string, weekdays: number[]) => void;
   onDelete: (id: string) => void;
   onApply: (id: string) => void;
+  onUpdate: (id: string) => void;
   onSaveCurrent: (name: string, weekdays: number[]) => void;
 }
 
 function TemplatesManagePanel({
   templates, activeTemplateId, onClose,
-  onRename, onSetWeekdays, onDelete, onApply, onSaveCurrent,
+  onRename, onSetWeekdays, onDelete, onApply, onUpdate, onSaveCurrent,
 }: TemplatesManagePanelProps) {
   const [newName, setNewName] = useState('');
   const [newDays, setNewDays] = useState<number[]>([]);
@@ -1102,11 +1103,11 @@ function TemplatesManagePanel({
           <button className="archive-close-btn" onClick={onClose}>✕</button>
         </div>
         <p className="history-hint">
-          Templates save habit order and section headers. Assign weekdays to auto-apply each morning — or pick one from the dropdown anytime.
+          Templates save order, sections, levels, and which habits/sections are off. Use Update on a template to overwrite it with the current board — or create a new one below.
         </p>
 
         <div className="tpl-save-box">
-          <span className="tpl-save-title">Save current board as template</span>
+          <span className="tpl-save-title">Create new template from current board</span>
           <input
             className="tpl-name-input"
             placeholder="e.g. Weekend"
@@ -1129,7 +1130,7 @@ function TemplatesManagePanel({
             })}
           </div>
           <button className="btn-save" onClick={saveNew} disabled={!newName.trim()}>
-            Save template
+            Create template
           </button>
         </div>
 
@@ -1173,7 +1174,14 @@ function TemplatesManagePanel({
                     </p>
                   )}
                   <div className="tpl-manage-actions">
-                    <button className="btn-restore" onClick={() => onApply(t.id)}>Apply now</button>
+                    <button className="btn-restore" onClick={() => onApply(t.id)}>Apply</button>
+                    <button
+                      className="btn-update-tpl"
+                      onClick={() => onUpdate(t.id)}
+                      title="Overwrite this template with the current board layout, levels, and disables"
+                    >
+                      Update
+                    </button>
                     <button
                       className="btn-delete-perm"
                       onClick={() => {
@@ -2480,7 +2488,35 @@ export default function App() {
       return [...cleared, tpl];
     });
     setActiveTemplateId(tpl.id);
-    showToast('success', `Saved template “${tpl.name}”`);
+    showToast('success', `Created template “${tpl.name}”`);
+  }, [showToast]);
+
+  /** Overwrite an existing template with the current board (keeps name + weekdays). */
+  const updateTemplateFromBoard = useCallback((id: string) => {
+    const existing = templatesRef.current.find(t => t.id === id);
+    if (!existing) return;
+    const active = templatesRef.current.find(t => t.id === activeTemplateIdRef.current);
+    const snap = snapshotTemplateFromBoard(
+      existing.name,
+      boardOrderRef.current,
+      sectionsRef.current,
+      habitsRef.current,
+      existing.weekdays,
+      active?.disabledHabitIds ?? existing.disabledHabitIds ?? [],
+      active?.hiddenSectionIds ?? existing.hiddenSectionIds ?? [],
+    );
+    setTemplates(prev => prev.map(t => {
+      if (t.id !== id) return t;
+      return {
+        ...t,
+        boardOrder: snap.boardOrder,
+        sections: snap.sections,
+        habitLevels: snap.habitLevels,
+        disabledHabitIds: snap.disabledHabitIds,
+        hiddenSectionIds: snap.hiddenSectionIds,
+      };
+    }));
+    showToast('success', `Updated “${existing.name}” from current board`);
   }, [showToast]);
 
   const toggleBoardDisable = useCallback((habitId: string) => {
@@ -3244,17 +3280,6 @@ export default function App() {
                     </button>
                     <button
                       className="add-section-btn"
-                      onClick={() => {
-                        const name = window.prompt('Template name', 'Weekend');
-                        if (!name?.trim()) return;
-                        saveCurrentAsTemplate(name.trim(), []);
-                      }}
-                      title="Save current board order as a template"
-                    >
-                      Save template
-                    </button>
-                    <button
-                      className="add-section-btn"
                       onClick={() => setShowTemplates(true)}
                       title="Manage board templates"
                     >
@@ -3339,6 +3364,7 @@ export default function App() {
           onSetWeekdays={setTemplateWeekdays}
           onDelete={deleteTemplate}
           onApply={id => { applyTemplateById(id, true); setShowTemplates(false); }}
+          onUpdate={updateTemplateFromBoard}
           onSaveCurrent={saveCurrentAsTemplate}
         />
       )}

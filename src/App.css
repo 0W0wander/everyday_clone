@@ -1570,7 +1570,23 @@ body {
   font-size: 11px; color: #b45309; line-height: 1.35;
 }
 .tpl-manage-actions {
-  display: flex; align-items: center; gap: 8px;
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.btn-update-tpl {
+  background: #fff;
+  border: 1px solid #bfdbfe;
+  color: #1d4ed8;
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.1s, border-color 0.1s;
+}
+.btn-update-tpl:hover {
+  background: #eff6ff;
+  border-color: #93c5fd;
 }
 
 /* ─── Mobile (< 640px) ──────────────────────────────────────────────────── */
