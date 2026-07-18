@@ -297,8 +297,7 @@ body {
   position: sticky;
   left: 0;
   background: #fff;
-  z-index: 3;
-  overflow: hidden;
+  z-index: 5;
   min-width: 0;
   box-sizing: border-box;
 }
@@ -309,7 +308,6 @@ body {
   min-width: 0;
   flex: 1;
   justify-content: flex-end;
-  overflow: hidden;
 }
 .archive-count-btn {
   display: flex;
@@ -456,9 +454,17 @@ body {
 }
 .section-edit-btn:hover { color: #2563eb; background: #eff6ff; }
 .section-disable-btn:hover { color: #b45309; background: #fffbeb; }
+.section-disable-btn.is-off { color: #d97706; }
 .section-delete-btn:hover { color: #ef4444; background: #fef2f2; }
 .section-edit-btn svg,
 .section-disable-btn svg { width: 12px; height: 12px; }
+.section-divider.section-hidden {
+  opacity: 0.55;
+}
+.section-divider.section-hidden .section-divider-label {
+  text-decoration: line-through;
+  text-decoration-color: #cbd5e1;
+}
 
 /* ─── Habit name column ───────────────────────────────────────────────────── */
 .habit-name {
@@ -1460,7 +1466,8 @@ body {
   min-width: 0;
 }
 .tpl-picker-btn:hover,
-.tpl-picker-btn.has-active {
+.tpl-picker-btn.has-active,
+.tpl-picker-btn.is-open {
   background: #eff6ff; color: #2563eb; border-color: #bfdbfe;
 }
 .tpl-picker-label {
@@ -1469,10 +1476,7 @@ body {
 }
 .tpl-picker-caret { font-size: 9px; opacity: 0.7; }
 .tpl-picker-menu {
-  position: absolute;
-  top: calc(100% + 6px);
-  left: 0;
-  z-index: 9999;
+  z-index: 10050;
   min-width: 200px;
   max-width: 260px;
   background: #fff;
@@ -1482,9 +1486,8 @@ body {
   box-shadow: 0 12px 32px rgba(0,0,0,0.14), 0 2px 8px rgba(0,0,0,0.06);
   display: flex; flex-direction: column; gap: 4px;
 }
-.tpl-picker-menu::before {
-  content: '';
-  position: absolute; bottom: 100%; left: 0; right: 0; height: 8px;
+.tpl-picker-menu-portal {
+  position: fixed;
 }
 .tpl-picker-empty {
   margin: 0; padding: 10px 8px;

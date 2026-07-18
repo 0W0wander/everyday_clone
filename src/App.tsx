@@ -694,6 +694,7 @@ function sanitizeTemplates(raw: unknown): BoardTemplate[] {
         : [],
       habitLevels: sanitizeHabitLevels((t as BoardTemplate).habitLevels),
       disabledHabitIds: sanitizeDisabledIds((t as BoardTemplate).disabledHabitIds),
+      hiddenSectionIds: sanitizeDisabledIds((t as BoardTemplate).hiddenSectionIds),
     }));
 }
 
@@ -803,6 +804,7 @@ function snapshotTemplateFromBoard(
   habits: Habit[],
   weekdays: number[] = [],
   disabledHabitIds: string[] = [],
+  hiddenSectionIds: string[] = [],
 ): BoardTemplate {
   const secMap = new Map(sections.map(s => [s.id, s]));
   const orderSecs = boardOrder
@@ -816,6 +818,7 @@ function snapshotTemplateFromBoard(
     habitLevels[h.id] = h.activeLevel ?? 0;
   }
   const disabled = disabledHabitIds.filter(id => habits.some(h => h.id === id));
+  const hiddenSecs = hiddenSectionIds.filter(id => sections.some(s => s.id === id));
   return {
     id: `tpl-${Date.now()}`,
     name: name.trim() || 'Untitled',
@@ -824,6 +827,7 @@ function snapshotTemplateFromBoard(
     weekdays: [...weekdays],
     habitLevels: Object.keys(habitLevels).length ? habitLevels : undefined,
     disabledHabitIds: disabled.length ? disabled : undefined,
+    hiddenSectionIds: hiddenSecs.length ? hiddenSecs : undefined,
   };
 }
 
@@ -859,19 +863,6 @@ function makeIsDue(
     if (tpl?.disabledHabitIds?.includes(h.id)) return false;
     return isScheduledOn(h, ds);
   };
-}
-
-/** Habit ids under a section until the next section in board order. */
-function habitIdsInSection(boardOrder: string[], sectionId: string, habitIds: Set<string>): string[] {
-  const start = boardOrder.indexOf(sectionId);
-  if (start < 0) return [];
-  const out: string[] = [];
-  for (let i = start + 1; i < boardOrder.length; i++) {
-    const id = boardOrder[i];
-    if (!habitIds.has(id)) break; // next section
-    out.push(id);
-  }
-  return out;
 }
 
 function loadBoard(): BoardState {
@@ -961,58 +952,101 @@ const TemplatePicker = memo(function TemplatePicker({
   templates, activeTemplateId, onSelect, onManage,
 }: TemplatePickerProps) {
   const [open, setOpen] = useState(false);
-  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null);
   const active = templates.find(t => t.id === activeTemplateId) ?? null;
-
-  const openNow = () => { if (closeTimer.current) clearTimeout(closeTimer.current); setOpen(true); };
-  const closeSoon = () => { closeTimer.current = setTimeout(() => setOpen(false), 220); };
 
   const weekdayHint = (t: BoardTemplate) => {
     if (!t.weekdays.length) return 'Manual';
     return t.weekdays.map(d => WEEKDAY_LABELS[d]).join('');
   };
 
-  return (
-    <div className="tpl-picker-wrap" onMouseEnter={openNow} onMouseLeave={closeSoon}>
+  const updatePos = useCallback(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    setMenuPos({ top: r.bottom + 6, left: r.left });
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!open) { setMenuPos(null); return; }
+    updatePos();
+    const onScroll = () => updatePos();
+    window.addEventListener('resize', updatePos);
+    window.addEventListener('scroll', onScroll, true);
+    return () => {
+      window.removeEventListener('resize', updatePos);
+      window.removeEventListener('scroll', onScroll, true);
+    };
+  }, [open, updatePos]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (wrapRef.current?.contains(t) || menuRef.current?.contains(t)) return;
+      setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  const menu = open && menuPos && createPortal(
+    <div
+      ref={menuRef}
+      className="tpl-picker-menu tpl-picker-menu-portal"
+      style={{ top: menuPos.top, left: menuPos.left }}
+    >
+      {templates.length === 0 ? (
+        <p className="tpl-picker-empty">No templates yet. Save one in edit mode.</p>
+      ) : (
+        <ul className="tpl-picker-list">
+          {templates.map(t => (
+            <li key={t.id}>
+              <button
+                type="button"
+                className={`tpl-picker-item${t.id === activeTemplateId ? ' active' : ''}`}
+                onClick={() => { onSelect(t.id); setOpen(false); }}
+              >
+                <span className="tpl-picker-item-name">{t.name}</span>
+                <span className="tpl-picker-item-days">{weekdayHint(t)}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
       <button
         type="button"
-        className={`tpl-picker-btn${active ? ' has-active' : ''}`}
+        className="tpl-picker-manage"
+        onClick={() => { setOpen(false); onManage(); }}
+      >
+        Manage templates…
+      </button>
+    </div>,
+    document.body,
+  );
+
+  return (
+    <div ref={wrapRef} className="tpl-picker-wrap">
+      <button
+        type="button"
+        className={`tpl-picker-btn${active ? ' has-active' : ''}${open ? ' is-open' : ''}`}
         onClick={() => setOpen(o => !o)}
         title="Board templates"
+        aria-haspopup="listbox"
+        aria-expanded={open}
       >
         <LayoutIcon />
         <span className="tpl-picker-label">{active?.name ?? 'Template'}</span>
         <span className="tpl-picker-caret">▾</span>
       </button>
-      {open && (
-        <div className="tpl-picker-menu" onMouseEnter={openNow} onMouseLeave={closeSoon}>
-          {templates.length === 0 ? (
-            <p className="tpl-picker-empty">No templates yet. Save one in edit mode.</p>
-          ) : (
-            <ul className="tpl-picker-list">
-              {templates.map(t => (
-                <li key={t.id}>
-                  <button
-                    type="button"
-                    className={`tpl-picker-item${t.id === activeTemplateId ? ' active' : ''}`}
-                    onClick={() => { onSelect(t.id); setOpen(false); }}
-                  >
-                    <span className="tpl-picker-item-name">{t.name}</span>
-                    <span className="tpl-picker-item-days">{weekdayHint(t)}</span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-          <button
-            type="button"
-            className="tpl-picker-manage"
-            onClick={() => { setOpen(false); onManage(); }}
-          >
-            Manage templates…
-          </button>
-        </div>
-      )}
+      {menu}
     </div>
   );
 });
@@ -1828,10 +1862,11 @@ interface SectionRowProps {
   editMode: boolean;
   isDragging: boolean;
   isDragOver: boolean;
-  canDisableForBoard: boolean;
+  sectionHidden: boolean;
+  canHideForBoard: boolean;
   onRename: (id: string, label: string) => void;
   onDelete: (id: string) => void;
-  onDisableHabits: (id: string) => void;
+  onToggleHidden: (id: string) => void;
   onDragStartRow: (id: string) => void;
   onDragOverRow:  (id: string) => void;
   onDropRow:      (srcId: string, targetId: string) => void;
@@ -1839,8 +1874,8 @@ interface SectionRowProps {
 }
 
 const SectionRow = memo(function SectionRow({
-  section, editMode, isDragging, isDragOver, canDisableForBoard,
-  onRename, onDelete, onDisableHabits, onDragStartRow, onDragOverRow, onDropRow, onDragEndRow,
+  section, editMode, isDragging, isDragOver, sectionHidden, canHideForBoard,
+  onRename, onDelete, onToggleHidden, onDragStartRow, onDragOverRow, onDropRow, onDragEndRow,
 }: SectionRowProps) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(section.label);
@@ -1863,7 +1898,7 @@ const SectionRow = memo(function SectionRow({
 
   return (
     <div
-      className={`section-divider${editMode ? ' section-editable' : ''}${isDragging ? ' dragging' : ''}${isDragOver ? ' drag-over' : ''}`}
+      className={`section-divider${editMode ? ' section-editable' : ''}${isDragging ? ' dragging' : ''}${isDragOver ? ' drag-over' : ''}${sectionHidden ? ' section-hidden' : ''}`}
       draggable={editMode && !editing}
       onDragStart={editMode && !editing ? e => {
         e.dataTransfer.effectAllowed = 'move';
@@ -1899,7 +1934,7 @@ const SectionRow = memo(function SectionRow({
           className="section-divider-label"
           onClick={editMode ? () => setEditing(true) : undefined}
           disabled={!editMode}
-          title={editMode ? 'Click to rename' : undefined}
+          title={editMode ? 'Click to rename' : sectionHidden ? 'Hidden on this board' : undefined}
         >
           {section.label}
         </button>
@@ -1914,13 +1949,13 @@ const SectionRow = memo(function SectionRow({
           >
             <PencilIcon />
           </button>
-          {canDisableForBoard && (
+          {canHideForBoard && (
             <button
-              className="section-disable-btn"
-              onClick={() => onDisableHabits(section.id)}
-              title="Disable habits in this section on the current board"
+              className={`section-disable-btn${sectionHidden ? ' is-off' : ''}`}
+              onClick={() => onToggleHidden(section.id)}
+              title={sectionHidden ? 'Show section on this board' : 'Hide section on this board (habits stay)'}
             >
-              <EyeOffIcon />
+              {sectionHidden ? <EyeOffIcon /> : <EyeIcon />}
             </button>
           )}
           <button
@@ -2434,6 +2469,7 @@ export default function App() {
       habitsRef.current,
       weekdays,
       active?.disabledHabitIds ?? [],
+      active?.hiddenSectionIds ?? [],
     );
     // Claiming weekdays removes them from other templates
     setTemplates(prev => {
@@ -2463,23 +2499,19 @@ export default function App() {
     }));
   }, [showToast]);
 
-  const disableSectionHabits = useCallback((sectionId: string) => {
+  const toggleSectionHidden = useCallback((sectionId: string) => {
     const tid = activeTemplateIdRef.current;
     if (!tid) {
       showToast('error', 'Select or save a board template first');
       return;
     }
-    const habitIdSet = new Set(habitsRef.current.map(h => h.id));
-    const ids = habitIdsInSection(boardOrderRef.current, sectionId, habitIdSet);
-    if (!ids.length) return;
     setTemplates(prev => prev.map(t => {
       if (t.id !== tid) return t;
-      const set = new Set(t.disabledHabitIds ?? []);
-      const allOff = ids.every(id => set.has(id));
-      if (allOff) ids.forEach(id => set.delete(id));
-      else ids.forEach(id => set.add(id));
-      const disabledHabitIds = [...set];
-      return { ...t, disabledHabitIds: disabledHabitIds.length ? disabledHabitIds : undefined };
+      const set = new Set(t.hiddenSectionIds ?? []);
+      if (set.has(sectionId)) set.delete(sectionId);
+      else set.add(sectionId);
+      const hiddenSectionIds = [...set];
+      return { ...t, hiddenSectionIds: hiddenSectionIds.length ? hiddenSectionIds : undefined };
     }));
   }, [showToast]);
 
@@ -2872,6 +2904,11 @@ export default function App() {
     return new Set(tpl?.disabledHabitIds ?? []);
   }, [templates, activeTemplateId]);
 
+  const activeHiddenSections = useMemo(() => {
+    const tpl = templates.find(t => t.id === activeTemplateId);
+    return new Set(tpl?.hiddenSectionIds ?? []);
+  }, [templates, activeTemplateId]);
+
   // Auto-apply weekday template each calendar day (manual dropdown overrides today).
   useEffect(() => {
     if (templateOverrideDate === todayStr) return;
@@ -2906,7 +2943,7 @@ export default function App() {
 
   // Interleaved sections + habits in board order. Habits respect due-today filter
   // (schedule + board disables). Edit / show-all reveals disabled habits so they
-  // can be toggled back on.
+  // can be toggled back on. Hidden sections are omitted outside edit mode.
   const boardRows = useMemo((): BoardRow[] => {
     const habitMap = new Map(habits.map(h => [h.id, h]));
     const secMap = new Map(sections.map(s => [s.id, s]));
@@ -2921,6 +2958,8 @@ export default function App() {
       const id = boardOrder[i];
       const sec = secMap.get(id);
       if (sec) {
+        const hiddenOnBoard = activeHiddenSections.has(sec.id);
+        if (hiddenOnBoard && !editMode) continue;
         const hasVisibleBelow = (() => {
           for (let j = i + 1; j < boardOrder.length; j++) {
             if (secMap.has(boardOrder[j])) break;
@@ -2928,7 +2967,9 @@ export default function App() {
           }
           return false;
         })();
-        if (showAll || hasVisibleBelow) rows.push({ kind: 'section', section: sec });
+        if (showAll || hasVisibleBelow || (editMode && hiddenOnBoard)) {
+          rows.push({ kind: 'section', section: sec });
+        }
         continue;
       }
       if (visibleIds.has(id)) {
@@ -2937,7 +2978,7 @@ export default function App() {
       }
     }
     return rows;
-  }, [habits, sections, boardOrder, editMode, showAllHabits, todayStr, isDue]);
+  }, [habits, sections, boardOrder, editMode, showAllHabits, todayStr, isDue, activeHiddenSections]);
   const shownHabitCount = boardRows.filter(r => r.kind === 'habit').length;
   const hiddenCount = visibleHabits.length - shownHabitCount;
   // Stable per-day seed so "start"/"victory" quotes vary day to day.
@@ -3148,10 +3189,11 @@ export default function App() {
                 editMode={editMode}
                 isDragging={draggingId === row.section.id}
                 isDragOver={dragOverId === row.section.id && draggingId !== row.section.id}
-                canDisableForBoard={!!activeTemplateId}
+                sectionHidden={activeHiddenSections.has(row.section.id)}
+                canHideForBoard={!!activeTemplateId}
                 onRename={renameSection}
                 onDelete={deleteSection}
-                onDisableHabits={disableSectionHabits}
+                onToggleHidden={toggleSectionHidden}
                 onDragStartRow={handleDragStart}
                 onDragOverRow={handleDragOver}
                 onDropRow={reorderBoardItem}

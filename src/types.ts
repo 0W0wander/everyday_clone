@@ -30,6 +30,8 @@ export interface BoardTemplate {
   habitLevels?: Record<string, number>;
   /** Habits inactive on this board (hidden; don't break streaks) */
   disabledHabitIds?: string[];
+  /** Section headers omitted on this board (habits underneath stay) */
+  hiddenSectionIds?: string[];
 }
 
 export interface Habit {
