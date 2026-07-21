@@ -2154,15 +2154,21 @@ const HabitRow = memo(function HabitRow(
               />
             )}
             {hasComment && (() => {
-              const pal = getPalette(habit.color);
-              // On colored cells: dot is 1-2 shades deeper than cell bg.
-              // On empty/failed: dot is a light-mid tint of the habit color.
-              const dotBg   = (done || skpd) ? pal[Math.min(intensityIdx(str) + 2, 7)] : pal[2];
-              const dotRing = (done || skpd) ? pal[Math.min(intensityIdx(str) + 1, 7)] : pal[4];
+              // Accent fill + white ring so the dot stays visible on maxed-out
+              // streak cells (same palette shade would otherwise blend in).
+              const dense = (done || skpd) && intensityIdx(str) >= 5;
               return (
                 <div
                   className="comment-dot"
-                  style={{ background: dotBg, boxShadow: `0 0 0 1.5px ${dotRing}` }}
+                  style={dense
+                    ? {
+                        background: '#fff',
+                        boxShadow: `0 0 0 1.5px ${getAccent(habit.color)}, 0 1px 2px rgba(15,23,42,0.35)`,
+                      }
+                    : {
+                        background: getAccent(habit.color),
+                        boxShadow: '0 0 0 1.5px #fff, 0 0 0 2.5px rgba(15,23,42,0.3)',
+                      }}
                 />
               );
             })()}
