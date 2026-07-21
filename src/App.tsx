@@ -263,13 +263,14 @@ interface Layout {
 }
 
 function getLayout(width: number): Layout {
+  // Day/today widths are CSS grid floors; `1fr` expands them to fill the viewport.
   if (width < 640) {
-    return { daysBack: 5, wName: 118, wDay: 30, wToday: 50, wStat: 38, rowH: 44, isMobile: true };
+    return { daysBack: 5, wName: 110, wDay: 28, wToday: 44, wStat: 36, rowH: 44, isMobile: true };
   }
-  if (width < 900) {
-    return { daysBack: 9, wName: 168, wDay: 38, wToday: 70, wStat: 46, rowH: 42, isMobile: false };
+  if (width < 1100) {
+    return { daysBack: 9, wName: 168, wDay: 34, wToday: 56, wStat: 44, rowH: 42, isMobile: false };
   }
-  return { daysBack: 13, wName: 220, wDay: 46, wToday: 90, wStat: 52, rowH: 42, isMobile: false };
+  return { daysBack: 13, wName: 200, wDay: 40, wToday: 64, wStat: 52, rowH: 42, isMobile: false };
 }
 
 // ─── Analytics helpers ────────────────────────────────────────────────────────
@@ -3027,9 +3028,10 @@ export default function App() {
 
   const { wName, wDay, wToday, wStat, daysBack, rowH, isMobile } = layout;
   const statCount = STAT_HEADERS[analyticsView].length;
+  // Fluid day columns fill leftover width; floors keep cells usable when narrow.
   const gridCols = isCurrentDay
-    ? `${wName}px repeat(${daysBack}, ${wDay}px) ${wToday}px repeat(${statCount}, ${wStat}px)`
-    : `${wName}px repeat(${daysBack + 1}, ${wDay}px) repeat(${statCount}, ${wStat}px)`;
+    ? `${wName}px repeat(${daysBack}, minmax(${wDay}px, 1fr)) minmax(${wToday}px, 1.4fr) repeat(${statCount}, ${wStat}px)`
+    : `${wName}px repeat(${daysBack + 1}, minmax(${wDay}px, 1fr)) repeat(${statCount}, ${wStat}px)`;
 
   const exportData = useCallback(() => {
     const blob = new Blob([JSON.stringify({
