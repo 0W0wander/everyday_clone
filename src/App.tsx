@@ -1,11 +1,15 @@
 import {
-  Fragment,
   useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, memo,
 } from 'react';
 import { createPortal } from 'react-dom';
 import './App.css';
-import type { Habit, HabitColor, HabitLevel, HabitSchedule } from './types';
-import { fetchRemote, pushRemote, isSyncConfigured } from './sync';
+import type {
+  Habit, HabitColor, HabitLevel, HabitSchedule, HabitSnapshot, BoardSection, BoardTemplate,
+} from './types';
+import {
+  fetchRemote, pushRemote, isSyncConfigured,
+  listGistCommits, fetchRevision, type GistCommit,
+} from './sync';
 import { getQuote } from './quotes';
 
 // ─── Color utilities ──────────────────────────────────────────────────────────
@@ -16,8 +20,7 @@ const LEGACY_COLOR_HEX: Record<string, string> = {
   orange: '#fb923c', red:    '#fb7185', purple: '#d946ef', teal:   '#2dd4bf',
 };
 const DEFAULT_COLOR = '#4ade80';
-const DEFAULT_PRICE       = 0.1;  // $ per normal completion
-const DEFAULT_BONUS_PRICE = 1;    // $ per middle-click "bonus" completion
+const DEFAULT_PRICE = 0.1;  // $ per normal / base-level completion
 
 // #rrggbb (or #rgb) → [H 0-360, S 0-100, L 0-100]
 function hexToHsl(hex: string): [number, number, number] {
@@ -82,6 +85,10 @@ const DAYS        = ['SUN','MON','TUE','WED','THU','FRI','SAT'];
 const STORAGE_KEY    = 'everyday-habits-v2';
 const SPENT_KEY      = 'everyday-spent-v1';
 const LAST_SPEND_KEY = 'everyday-last-spend-v1';
+const SNAPSHOTS_KEY  = 'everyday-snapshots-v1';
+const TEMPLATE_OVERRIDE_KEY = 'everyday-template-override-v1';
+const WEEKDAY_LABELS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+const WEEKDAY_NAMES  = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
 function loadSpent(): number {
   try {
@@ -99,6 +106,150 @@ function loadLastSpend(): number {
   } catch { return 0; }
 }
 
+function loadSnapshots(): HabitSnapshot[] {
+  try {
+    const raw = localStorage.getItem(SNAPSHOTS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((s): s is HabitSnapshot =>
+      !!s && typeof s === 'object'
+      && typeof s.id === 'string'
+      && typeof s.habitId === 'string'
+      && typeof s.at === 'string'
+      && typeof s.name === 'string'
+      && typeof s.color === 'string',
+    );
+  } catch { return []; }
+}
+
+/** Cloud / local sync blob shape (legacy payloads may omit newer fields). */
+interface SyncPayload {
+  habits: Habit[];
+  sections?: BoardSection[];
+  boardOrder?: string[];
+  templates?: BoardTemplate[];
+  activeTemplateId?: string | null;
+  spent: number;
+  lastSpend?: number;
+  snapshots?: HabitSnapshot[];
+}
+
+interface BoardState {
+  habits: Habit[];
+  sections: BoardSection[];
+  boardOrder: string[];
+  templates: BoardTemplate[];
+  activeTemplateId: string | null;
+}
+
+function parseRemotePayload(raw: unknown): {
+  board: BoardState | null;
+  spent: number | null;
+  lastSpend: number | null;
+  snapshots: HabitSnapshot[] | null;
+} {
+  if (Array.isArray(raw)) {
+    return { board: boardFromLegacyHabits(raw), spent: null, lastSpend: null, snapshots: null };
+  }
+  if (!raw || typeof raw !== 'object') {
+    return { board: null, spent: null, lastSpend: null, snapshots: null };
+  }
+  const obj = raw as {
+    habits?: unknown;
+    sections?: unknown;
+    boardOrder?: unknown;
+    templates?: unknown;
+    activeTemplateId?: unknown;
+    spent?: unknown;
+    lastSpend?: unknown;
+    snapshots?: unknown;
+  };
+  const board = Array.isArray(obj.habits)
+    ? sanitizeBoard(obj.habits, obj.sections, obj.boardOrder, obj.templates, obj.activeTemplateId)
+    : null;
+  const spent = typeof obj.spent === 'number' && Number.isFinite(obj.spent) ? Math.max(0, obj.spent) : null;
+  const lastSpend = typeof obj.lastSpend === 'number' && Number.isFinite(obj.lastSpend)
+    ? Math.max(0, obj.lastSpend) : null;
+  let snapshots: HabitSnapshot[] | null = null;
+  if (Array.isArray(obj.snapshots)) {
+    snapshots = obj.snapshots.filter((s): s is HabitSnapshot =>
+      !!s && typeof s === 'object'
+      && typeof (s as HabitSnapshot).id === 'string'
+      && typeof (s as HabitSnapshot).habitId === 'string'
+      && typeof (s as HabitSnapshot).at === 'string'
+      && typeof (s as HabitSnapshot).name === 'string'
+      && typeof (s as HabitSnapshot).color === 'string',
+    );
+  }
+  return { board, spent, lastSpend, snapshots };
+}
+
+function loadTemplateOverrideDate(): string | null {
+  try {
+    const raw = localStorage.getItem(TEMPLATE_OVERRIDE_KEY);
+    return raw && /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : null;
+  } catch { return null; }
+}
+
+function saveTemplateOverrideDate(ds: string | null) {
+  try {
+    if (ds) localStorage.setItem(TEMPLATE_OVERRIDE_KEY, ds);
+    else localStorage.removeItem(TEMPLATE_OVERRIDE_KEY);
+  } catch { /* noop */ }
+}
+
+function snapshotFromHabit(h: Habit): HabitSnapshot {
+  return {
+    id: `snap-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    habitId: h.id,
+    at: new Date().toISOString(),
+    name: h.name,
+    color: h.color,
+    price: h.price,
+    levels: h.levels ? h.levels.map(l => ({ ...l })) : undefined,
+    schedule: h.schedule ? structuredClone(h.schedule) : undefined,
+  };
+}
+
+function defChanged(
+  h: Habit,
+  next: {
+    name: string; color: HabitColor; price: number;
+    levels: HabitLevel[]; schedule: HabitSchedule | undefined;
+  },
+): boolean {
+  if (h.name !== next.name) return true;
+  if (h.color !== next.color) return true;
+  if ((h.price ?? DEFAULT_PRICE) !== next.price) return true;
+  if (JSON.stringify(h.levels ?? []) !== JSON.stringify(next.levels)) return true;
+  if (JSON.stringify(h.schedule ?? null) !== JSON.stringify(next.schedule ?? null)) return true;
+  return false;
+}
+
+function formatRelativeTime(iso: string): string {
+  const t = new Date(iso).getTime();
+  if (!Number.isFinite(t)) return iso;
+  const sec = Math.round((Date.now() - t) / 1000);
+  if (sec < 60) return 'just now';
+  const min = Math.round(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.round(min / 60);
+  if (hr < 48) return `${hr}h ago`;
+  const days = Math.round(hr / 24);
+  if (days < 30) return `${days}d ago`;
+  return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+function formatSnapshotWhen(iso: string): string {
+  const d = new Date(iso);
+  if (!Number.isFinite(d.getTime())) return iso;
+  return d.toLocaleString(undefined, {
+    month: 'short', day: 'numeric', year: 'numeric',
+    hour: 'numeric', minute: '2-digit',
+  });
+}
+
 // ─── Responsive layout ────────────────────────────────────────────────────────
 
 interface Layout {
@@ -112,13 +263,14 @@ interface Layout {
 }
 
 function getLayout(width: number): Layout {
+  // Day/today widths are CSS grid floors; `1fr` expands them to fill the viewport.
   if (width < 640) {
-    return { daysBack: 5, wName: 100, wDay: 30, wToday: 50, wStat: 38, rowH: 44, isMobile: true };
+    return { daysBack: 5, wName: 110, wDay: 28, wToday: 44, wStat: 36, rowH: 44, isMobile: true };
   }
-  if (width < 900) {
-    return { daysBack: 9, wName: 130, wDay: 38, wToday: 70, wStat: 46, rowH: 42, isMobile: false };
+  if (width < 1100) {
+    return { daysBack: 9, wName: 168, wDay: 34, wToday: 56, wStat: 44, rowH: 42, isMobile: false };
   }
-  return { daysBack: 13, wName: 175, wDay: 46, wToday: 90, wStat: 52, rowH: 42, isMobile: false };
+  return { daysBack: 13, wName: 200, wDay: 40, wToday: 64, wStat: 52, rowH: 42, isMobile: false };
 }
 
 // ─── Analytics helpers ────────────────────────────────────────────────────────
@@ -221,127 +373,115 @@ function useViewportWidth(): number {
 }
 
 // ─── Streak helpers ───────────────────────────────────────────────────────────
-// Skips AND off-schedule days are transparent: they neither break nor extend a streak.
-// Only on-schedule completions count. (isScheduledOn is declared later; function decls hoist.)
+// Completions count; skips and off-schedule days are transparent (don't break,
+// don't count). A due day that was failed or left empty breaks the chain.
 
-function dayLevelOf(h: Habit, ds: string): number {
-  if (!habitHasLevels(h)) return 0;
-  return Math.min(h.dayLevels?.[ds] ?? 0, Math.max(0, effectiveLevels(h).length - 1));
+type DueFn = (h: Habit, ds: string) => boolean;
+
+function streakEarliest(h: Habit): string | null {
+  let earliest: string | null = null;
+  for (const ds of [...h.completions, ...h.skips]) {
+    if (earliest === null || ds < earliest) earliest = ds;
+  }
+  return earliest;
 }
 
-function isStreakNeutral(h: Habit, skip: Set<string>, ds: string): boolean {
-  return skip.has(ds) || !isScheduledOn(h, ds);
-}
-
-/** Walk backward from ds counting on-schedule completions (optionally at-least level). */
-function streakAt(h: Habit, ds: string, minLevel?: number): number {
+/** Streak of completions ending on `ds` (must be a completed or skipped day). */
+function streakAt(h: Habit, ds: string, isDue: DueFn = isScheduledOn): number {
   const comp = new Set(h.completions);
   const skip = new Set(h.skips);
+  const fail = new Set(h.fails);
   if (!comp.has(ds) && !skip.has(ds)) return 0;
 
-  // Off-schedule completion: local shade only — does not join the on-schedule chain
-  if (comp.has(ds) && !isScheduledOn(h, ds)) {
-    if (minLevel !== undefined && dayLevelOf(h, ds) < minLevel) return 0;
-    return 1;
-  }
-
+  const earliest = streakEarliest(h) ?? ds;
   let n = 0;
   const d = new Date(ds + 'T12:00:00');
-  for (let guard = 0; guard < 4000; guard++) {
+  while (fmt(d) >= earliest) {
     const s = fmt(d);
-    if (isStreakNeutral(h, skip, s)) {
-      d.setDate(d.getDate() - 1);
-      continue;
-    }
-    if (comp.has(s) && (minLevel === undefined || dayLevelOf(h, s) >= minLevel)) {
+    if (comp.has(s)) {
       n++;
-      d.setDate(d.getDate() - 1);
-      continue;
+    } else if (skip.has(s)) {
+      // transparent
+    } else if (fail.has(s)) {
+      break;
+    } else if (!isDue(h, s)) {
+      // off-day / board-disabled — transparent
+    } else {
+      break; // due but empty
     }
-    break;
+    d.setDate(d.getDate() - 1);
   }
   return n;
 }
 
-function calcCurrentStreak(h: Habit, minLevel?: number): number {
+function calcCurrentStreak(h: Habit, isDue: DueFn = isScheduledOn): number {
   const comp = new Set(h.completions);
   const skip = new Set(h.skips);
+  const fail = new Set(h.fails);
+  const earliest = streakEarliest(h);
+  if (earliest === null) return 0;
+
+  const today = fmt(todayNoon());
   const d = todayNoon();
-  let ds = fmt(d);
-  // Grace: today is a scheduled miss → start from yesterday
-  if (isScheduledOn(h, ds) && !comp.has(ds) && !skip.has(ds)) {
+  let n = 0;
+
+  while (fmt(d) >= earliest) {
+    const s = fmt(d);
+    if (comp.has(s)) {
+      n++;
+    } else if (skip.has(s)) {
+      // transparent
+    } else if (fail.has(s)) {
+      break;
+    } else if (!isDue(h, s)) {
+      // off-day / board-disabled — transparent
+    } else if (s === today) {
+      // grace: today is still in progress
+    } else {
+      break; // missed a due day
+    }
     d.setDate(d.getDate() - 1);
-    ds = fmt(d);
   }
-  // Need a completion (meeting minLevel) at the tip, walking through neutrals
-  for (let guard = 0; guard < 4000; guard++) {
-    ds = fmt(d);
-    if (isStreakNeutral(h, skip, ds)) {
-      d.setDate(d.getDate() - 1);
-      continue;
-    }
-    if (comp.has(ds) && (minLevel === undefined || dayLevelOf(h, ds) >= minLevel)) {
-      return streakAt(h, ds, minLevel);
-    }
-    return 0;
-  }
-  return 0;
+  return n;
 }
 
-function calcLongestStreak(h: Habit, minLevel?: number): number {
+function calcLongestStreak(h: Habit, isDue: DueFn = isScheduledOn): number {
   const comp = new Set(h.completions);
   const skip = new Set(h.skips);
-  const dates = [...comp].filter(ds => {
-    if (!isScheduledOn(h, ds)) return false;
-    if (minLevel !== undefined && dayLevelOf(h, ds) < minLevel) return false;
-    return true;
-  }).sort();
-  if (!dates.length) return 0;
+  const fail = new Set(h.fails);
+  const earliest = streakEarliest(h);
+  if (earliest === null) return 0;
 
-  // Walk calendar from first completion, neutrals don't break, scheduled misses do
-  const start = new Date(dates[0] + 'T12:00:00');
-  const end = todayNoon();
-  let max = 0, cur = 0;
-  for (const d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
-    const ds = fmt(d);
-    if (isStreakNeutral(h, skip, ds)) continue;
-    if (comp.has(ds) && (minLevel === undefined || dayLevelOf(h, ds) >= minLevel)) {
+  const today = fmt(todayNoon());
+  let max = 0;
+  let cur = 0;
+  const d = new Date(earliest + 'T12:00:00');
+
+  while (fmt(d) <= today) {
+    const s = fmt(d);
+    if (comp.has(s)) {
       cur++;
-      max = Math.max(max, cur);
+      if (cur > max) max = cur;
+    } else if (skip.has(s)) {
+      // transparent
+    } else if (fail.has(s)) {
+      cur = 0;
+    } else if (!isDue(h, s)) {
+      // off-day / board-disabled — transparent
+    } else if (s === today) {
+      // today still open — don't wipe the run
     } else {
       cur = 0;
     }
+    d.setDate(d.getDate() + 1);
   }
   return max;
-}
-
-function calcCurrentLevelStreak(h: Habit, levelIdx: number): number {
-  return calcCurrentStreak(h, levelIdx);
-}
-
-function calcLongestLevelStreak(h: Habit, levelIdx: number): number {
-  return calcLongestStreak(h, levelIdx);
-}
-
-function normalLevelOf(h: Habit): number {
-  if (!habitHasLevels(h)) return 0;
-  return Math.min(h.activeLevel ?? 0, Math.max(0, effectiveLevels(h).length - 1));
-}
-
-/** After logging `loggedLevel`, promote activeLevel if on-schedule streak ≥ threshold. */
-function withAutoPromote(h: Habit, loggedLevel: number): Habit {
-  if (!habitHasLevels(h)) return h;
-  const cur = Math.min(loggedLevel, effectiveLevels(h).length - 1);
-  const active = normalLevelOf(h);
-  if (cur <= active) return h;
-  if (calcCurrentLevelStreak(h, cur) < NORMAL_STREAK_DAYS) return h;
-  return { ...h, activeLevel: cur };
 }
 
 // Consecutive days (ending today, or yesterday if today isn't finished yet) on
 // which every habit DUE that day was completed or skipped. Skips don't break it,
 // and days where nothing is scheduled are neutral (don't break, don't count).
-function calcDayStreak(habits: Habit[]): number {
+function calcDayStreak(habits: Habit[], isDue: DueFn = isScheduledOn): number {
   if (habits.length === 0) return 0;
   const comp = new Map<string, Set<string>>();
   const skip = new Map<string, Set<string>>();
@@ -357,7 +497,7 @@ function calcDayStreak(habits: Habit[]): number {
 
   // 'ok' = all due done/skipped, 'fail' = something due missed, 'none' = nothing due
   const dayState = (ds: string): 'ok' | 'fail' | 'none' => {
-    const due = habits.filter(h => isScheduledOn(h, ds));
+    const due = habits.filter(h => isDue(h, ds));
     if (due.length === 0) return 'none';
     return due.every(h => comp.get(h.id)!.has(ds) || skip.get(h.id)!.has(ds)) ? 'ok' : 'fail';
   };
@@ -418,14 +558,13 @@ function effectiveLevels(h: Habit): HabitLevel[] {
   return [{ name: h.name, price: h.price ?? DEFAULT_PRICE }, ...(h.levels ?? [])];
 }
 
-// Money earned for a single completed day, honoring levels → bonus → flat price
+// Money earned for a single completed day, honoring levels → flat price
 function priceForDay(h: Habit, ds: string): number {
   if (habitHasLevels(h)) {
     const eff = effectiveLevels(h);
     const idx = Math.min(h.dayLevels?.[ds] ?? 0, eff.length - 1);
     return eff[idx].price;
   }
-  if ((h.bonuses ?? []).includes(ds)) return h.bonusPrice ?? DEFAULT_BONUS_PRICE;
   return h.price ?? DEFAULT_PRICE;
 }
 
@@ -489,13 +628,10 @@ function sanitize(h: Partial<Habit>): Habit {
     completions: Array.isArray(h.completions) ? h.completions.filter(d => typeof d === 'string') : [],
     skips:       Array.isArray(h.skips)       ? h.skips.filter(d => typeof d === 'string')       : [],
     fails:       Array.isArray(h.fails)       ? h.fails.filter(d => typeof d === 'string')       : [],
-    bonuses:     Array.isArray(h.bonuses)     ? h.bonuses.filter(d => typeof d === 'string')     : [],
-    price:       (typeof h.price === 'number'      && isFinite(h.price)      && h.price      >= 0) ? h.price      : undefined,
-    bonusPrice:  (typeof h.bonusPrice === 'number' && isFinite(h.bonusPrice) && h.bonusPrice >= 0) ? h.bonusPrice : undefined,
+    price:       (typeof h.price === 'number' && isFinite(h.price) && h.price >= 0) ? h.price : undefined,
     levels:      sanitizeLevels(h.levels),
     dayLevels:   sanitizeDayLevels(h.dayLevels),
     activeLevel: (typeof h.activeLevel === 'number' && isFinite(h.activeLevel) && h.activeLevel >= 0) ? Math.floor(h.activeLevel) : undefined,
-    sectionBefore: typeof h.sectionBefore === 'string' && h.sectionBefore.trim() ? h.sectionBefore.trim() : undefined,
     schedule:    sanitizeSchedule(h.schedule),
     isBreak:  !!h.isBreak,
     archived: !!h.archived,
@@ -514,12 +650,242 @@ function sanitizeAll(raw: unknown): Habit[] {
   return raw.map(h => sanitize(h as Partial<Habit>));
 }
 
-function loadHabits(): Habit[] {
+function sanitizeSections(raw: unknown): BoardSection[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((s): s is BoardSection =>
+      !!s && typeof s === 'object'
+      && typeof (s as BoardSection).id === 'string'
+      && typeof (s as BoardSection).label === 'string'
+      && (s as BoardSection).label.trim().length > 0,
+    )
+    .map(s => ({ id: s.id, label: s.label.trim() }));
+}
+
+function sanitizeHabitLevels(raw: unknown): Record<string, number> | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const out: Record<string, number> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof k === 'string' && typeof v === 'number' && isFinite(v) && v >= 0) {
+      out[k] = Math.floor(v);
+    }
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+function sanitizeDisabledIds(raw: unknown): string[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const ids = raw.filter((id): id is string => typeof id === 'string' && id.length > 0);
+  return ids.length ? [...new Set(ids)] : undefined;
+}
+
+function sanitizeTemplates(raw: unknown): BoardTemplate[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((t): t is BoardTemplate =>
+      !!t && typeof t === 'object'
+      && typeof (t as BoardTemplate).id === 'string'
+      && typeof (t as BoardTemplate).name === 'string'
+      && (t as BoardTemplate).name.trim().length > 0
+      && Array.isArray((t as BoardTemplate).boardOrder)
+      && Array.isArray((t as BoardTemplate).sections),
+    )
+    .map(t => ({
+      id: t.id,
+      name: t.name.trim(),
+      boardOrder: t.boardOrder.filter((id): id is string => typeof id === 'string'),
+      sections: sanitizeSections(t.sections),
+      weekdays: Array.isArray(t.weekdays)
+        ? [...new Set(t.weekdays.filter((d): d is number => typeof d === 'number' && d >= 0 && d <= 6))]
+        : [],
+      habitLevels: sanitizeHabitLevels((t as BoardTemplate).habitLevels),
+      disabledHabitIds: sanitizeDisabledIds((t as BoardTemplate).disabledHabitIds),
+      hiddenSectionIds: sanitizeDisabledIds((t as BoardTemplate).hiddenSectionIds),
+    }));
+}
+
+function emptyBoard(): BoardState {
+  return { habits: [], sections: [], boardOrder: [], templates: [], activeTemplateId: null };
+}
+
+/** Lift legacy `sectionBefore` strings off habits into independent board sections. */
+function boardFromLegacyHabits(rawHabits: unknown): BoardState {
+  if (!Array.isArray(rawHabits)) return emptyBoard();
+  const sections: BoardSection[] = [];
+  const boardOrder: string[] = [];
+  const habits: Habit[] = [];
+  for (const item of rawHabits) {
+    const partial = (item ?? {}) as Partial<Habit> & { sectionBefore?: unknown };
+    const habit = sanitize(partial);
+    const legacySection = typeof partial.sectionBefore === 'string' && partial.sectionBefore.trim()
+      ? partial.sectionBefore.trim()
+      : '';
+    if (legacySection) {
+      const sid = `sec-${habit.id}`;
+      sections.push({ id: sid, label: legacySection });
+      boardOrder.push(sid);
+    }
+    habits.push(habit);
+    boardOrder.push(habit.id);
+  }
+  return { habits, sections, boardOrder, templates: [], activeTemplateId: null };
+}
+
+function sanitizeBoard(
+  rawHabits: unknown,
+  rawSections: unknown,
+  rawOrder: unknown,
+  rawTemplates?: unknown,
+  rawActiveId?: unknown,
+): BoardState {
+  // If sections/order missing, migrate from legacy habit.sectionBefore
+  if (!Array.isArray(rawSections) && !Array.isArray(rawOrder)) {
+    const legacy = boardFromLegacyHabits(rawHabits);
+    return {
+      ...legacy,
+      templates: sanitizeTemplates(rawTemplates),
+      activeTemplateId: typeof rawActiveId === 'string' ? rawActiveId : null,
+    };
+  }
+  const habits = sanitizeAll(rawHabits);
+  const sections = sanitizeSections(rawSections);
+  const habitIds = new Set(habits.map(h => h.id));
+  const sectionIds = new Set(sections.map(s => s.id));
+  let boardOrder: string[] = [];
+  if (Array.isArray(rawOrder)) {
+    boardOrder = rawOrder.filter((id): id is string =>
+      typeof id === 'string' && (habitIds.has(id) || sectionIds.has(id)),
+    );
+  }
+  // Append anything missing from order
+  for (const s of sections) {
+    if (!boardOrder.includes(s.id)) boardOrder.push(s.id);
+  }
+  for (const h of habits) {
+    if (!boardOrder.includes(h.id)) boardOrder.push(h.id);
+  }
+  const templates = sanitizeTemplates(rawTemplates);
+  const activeTemplateId = typeof rawActiveId === 'string' && templates.some(t => t.id === rawActiveId)
+    ? rawActiveId
+    : null;
+  // Drop orphaned section refs already filtered; drop unknown ids done above
+  return {
+    habits,
+    sections: sections.filter(s => boardOrder.includes(s.id)),
+    boardOrder,
+    templates,
+    activeTemplateId,
+  };
+}
+
+/** Compute layout from a template against current habits/sections. */
+function layoutFromTemplate(
+  template: BoardTemplate,
+  habits: Habit[],
+  liveSections: BoardSection[],
+): { boardOrder: string[]; sections: BoardSection[] } {
+  const habitIds = new Set(habits.map(h => h.id));
+  const secById = new Map(liveSections.map(s => [s.id, s]));
+  for (const ts of template.sections) {
+    const existing = secById.get(ts.id);
+    if (existing) secById.set(ts.id, { ...existing, label: ts.label });
+    else secById.set(ts.id, { id: ts.id, label: ts.label });
+  }
+  const sections = [...secById.values()];
+  const sectionIds = new Set(sections.map(s => s.id));
+  const boardOrder = template.boardOrder.filter(id => habitIds.has(id) || sectionIds.has(id));
+  for (const s of sections) {
+    if (!boardOrder.includes(s.id)) boardOrder.push(s.id);
+  }
+  for (const h of habits) {
+    if (!boardOrder.includes(h.id)) boardOrder.push(h.id);
+  }
+  return { boardOrder, sections };
+}
+
+function snapshotTemplateFromBoard(
+  name: string,
+  boardOrder: string[],
+  sections: BoardSection[],
+  habits: Habit[],
+  weekdays: number[] = [],
+  disabledHabitIds: string[] = [],
+  hiddenSectionIds: string[] = [],
+): BoardTemplate {
+  const secMap = new Map(sections.map(s => [s.id, s]));
+  const orderSecs = boardOrder
+    .map(id => secMap.get(id))
+    .filter((s): s is BoardSection => !!s)
+    .map(s => ({ id: s.id, label: s.label }));
+  const habitLevels: Record<string, number> = {};
+  for (const h of habits) {
+    if (!boardOrder.includes(h.id)) continue;
+    if (!habitHasLevels(h)) continue;
+    habitLevels[h.id] = h.activeLevel ?? 0;
+  }
+  const disabled = disabledHabitIds.filter(id => habits.some(h => h.id === id));
+  const hiddenSecs = hiddenSectionIds.filter(id => sections.some(s => s.id === id));
+  return {
+    id: `tpl-${Date.now()}`,
+    name: name.trim() || 'Untitled',
+    boardOrder: [...boardOrder],
+    sections: orderSecs,
+    weekdays: [...weekdays],
+    habitLevels: Object.keys(habitLevels).length ? habitLevels : undefined,
+    disabledHabitIds: disabled.length ? disabled : undefined,
+    hiddenSectionIds: hiddenSecs.length ? hiddenSecs : undefined,
+  };
+}
+
+/** Which board template governs a given calendar date (for disable rules / levels). */
+function templateForDate(
+  templates: BoardTemplate[],
+  ds: string,
+  todayStr: string,
+  activeTemplateId: string | null,
+  overrideDate: string | null,
+): BoardTemplate | null {
+  if (ds === todayStr) {
+    if (overrideDate === todayStr && activeTemplateId) {
+      return templates.find(t => t.id === activeTemplateId) ?? null;
+    }
+    const dow = new Date(ds + 'T12:00:00').getDay();
+    return templates.find(t => t.weekdays.includes(dow))
+      ?? (activeTemplateId ? templates.find(t => t.id === activeTemplateId) ?? null : null);
+  }
+  const dow = new Date(ds + 'T12:00:00').getDay();
+  return templates.find(t => t.weekdays.includes(dow)) ?? null;
+}
+
+function makeIsDue(
+  templates: BoardTemplate[],
+  todayStr: string,
+  activeTemplateId: string | null,
+  overrideDate: string | null,
+): DueFn {
+  return (h, ds) => {
+    if (h.archived) return false;
+    const tpl = templateForDate(templates, ds, todayStr, activeTemplateId, overrideDate);
+    if (tpl?.disabledHabitIds?.includes(h.id)) return false;
+    return isScheduledOn(h, ds);
+  };
+}
+
+function loadBoard(): BoardState {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) return sanitizeAll(JSON.parse(raw));
+    if (!raw) return emptyBoard();
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) return boardFromLegacyHabits(parsed);
+    if (parsed && typeof parsed === 'object' && Array.isArray((parsed as { habits?: unknown }).habits)) {
+      const p = parsed as {
+        habits: unknown; sections?: unknown; boardOrder?: unknown;
+        templates?: unknown; activeTemplateId?: unknown;
+      };
+      return sanitizeBoard(p.habits, p.sections, p.boardOrder, p.templates, p.activeTemplateId);
+    }
   } catch { /* noop */ }
-  return [];
+  return emptyBoard();
 }
 
 // ─── ArchivePanel ─────────────────────────────────────────────────────────────
@@ -571,6 +937,479 @@ function ArchivePanel({ archivedHabits, onRestore, onDelete, onClose }: ArchiveP
                 </button>
               </li>
             ))}
+          </ul>
+        )}
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+// ─── TemplatePicker — header dropdown to select a board template ─────────────
+
+interface TemplatePickerProps {
+  templates: BoardTemplate[];
+  activeTemplateId: string | null;
+  onSelect: (id: string) => void;
+  onManage: () => void;
+}
+
+const TemplatePicker = memo(function TemplatePicker({
+  templates, activeTemplateId, onSelect, onManage,
+}: TemplatePickerProps) {
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null);
+  const active = templates.find(t => t.id === activeTemplateId) ?? null;
+
+  const weekdayHint = (t: BoardTemplate) => {
+    if (!t.weekdays.length) return 'Manual';
+    return t.weekdays.map(d => WEEKDAY_LABELS[d]).join('');
+  };
+
+  const updatePos = useCallback(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    setMenuPos({ top: r.bottom + 6, left: r.left });
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!open) { setMenuPos(null); return; }
+    updatePos();
+    const onScroll = () => updatePos();
+    window.addEventListener('resize', updatePos);
+    window.addEventListener('scroll', onScroll, true);
+    return () => {
+      window.removeEventListener('resize', updatePos);
+      window.removeEventListener('scroll', onScroll, true);
+    };
+  }, [open, updatePos]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (wrapRef.current?.contains(t) || menuRef.current?.contains(t)) return;
+      setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  const menu = open && menuPos && createPortal(
+    <div
+      ref={menuRef}
+      className="tpl-picker-menu tpl-picker-menu-portal"
+      style={{ top: menuPos.top, left: menuPos.left }}
+    >
+      {templates.length === 0 ? (
+        <p className="tpl-picker-empty">No templates yet. Save one in edit mode.</p>
+      ) : (
+        <ul className="tpl-picker-list">
+          {templates.map(t => (
+            <li key={t.id}>
+              <button
+                type="button"
+                className={`tpl-picker-item${t.id === activeTemplateId ? ' active' : ''}`}
+                onClick={() => { onSelect(t.id); setOpen(false); }}
+              >
+                <span className="tpl-picker-item-name">{t.name}</span>
+                <span className="tpl-picker-item-days">{weekdayHint(t)}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <button
+        type="button"
+        className="tpl-picker-manage"
+        onClick={() => { setOpen(false); onManage(); }}
+      >
+        Manage templates…
+      </button>
+    </div>,
+    document.body,
+  );
+
+  return (
+    <div ref={wrapRef} className="tpl-picker-wrap">
+      <button
+        type="button"
+        className={`tpl-picker-btn${active ? ' has-active' : ''}${open ? ' is-open' : ''}`}
+        onClick={() => setOpen(o => !o)}
+        title="Board templates"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+      >
+        <LayoutIcon />
+        <span className="tpl-picker-label">{active?.name ?? 'Template'}</span>
+        <span className="tpl-picker-caret">▾</span>
+      </button>
+      {menu}
+    </div>
+  );
+});
+
+// ─── TemplatesManagePanel — create / rename / weekdays / delete ───────────────
+
+interface TemplatesManagePanelProps {
+  templates: BoardTemplate[];
+  activeTemplateId: string | null;
+  onClose: () => void;
+  onRename: (id: string, name: string) => void;
+  onSetWeekdays: (id: string, weekdays: number[]) => void;
+  onDelete: (id: string) => void;
+  onApply: (id: string) => void;
+  onUpdate: (id: string) => void;
+  onSaveCurrent: (name: string, weekdays: number[]) => void;
+}
+
+function TemplatesManagePanel({
+  templates, activeTemplateId, onClose,
+  onRename, onSetWeekdays, onDelete, onApply, onUpdate, onSaveCurrent,
+}: TemplatesManagePanelProps) {
+  const [newName, setNewName] = useState('');
+  const [newDays, setNewDays] = useState<number[]>([]);
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [onClose]);
+
+  const claimedBy = (day: number, exceptId?: string) =>
+    templates.find(t => t.id !== exceptId && t.weekdays.includes(day));
+
+  const toggleNewDay = (d: number) =>
+    setNewDays(prev => prev.includes(d) ? prev.filter(x => x !== d) : [...prev, d].sort((a, b) => a - b));
+
+  const saveNew = () => {
+    const n = newName.trim();
+    if (!n) return;
+    onSaveCurrent(n, newDays);
+    setNewName('');
+    setNewDays([]);
+  };
+
+  return createPortal(
+    <div className="archive-overlay" onClick={onClose}>
+      <div className="archive-panel tpl-manage-panel" onClick={e => e.stopPropagation()}>
+        <div className="archive-panel-header">
+          <div className="archive-panel-title-group">
+            <LayoutIcon />
+            <span className="archive-panel-title">Board templates</span>
+          </div>
+          <button className="archive-close-btn" onClick={onClose}>✕</button>
+        </div>
+        <p className="history-hint">
+          Templates save order, sections, levels, and which habits/sections are off. Use Update on a template to overwrite it with the current board — or create a new one below.
+        </p>
+
+        <div className="tpl-save-box">
+          <span className="tpl-save-title">Create new template from current board</span>
+          <input
+            className="tpl-name-input"
+            placeholder="e.g. Weekend"
+            value={newName}
+            onChange={e => setNewName(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') saveNew(); }}
+          />
+          <div className="tpl-weekday-row">
+            {WEEKDAY_LABELS.map((lbl, d) => {
+              const clash = claimedBy(d);
+              return (
+                <button
+                  key={d}
+                  type="button"
+                  className={`tpl-day${newDays.includes(d) ? ' on' : ''}${clash ? ' clash' : ''}`}
+                  title={clash ? `Also used by “${clash.name}” — saving will take it` : WEEKDAY_NAMES[d]}
+                  onClick={() => toggleNewDay(d)}
+                >{lbl}</button>
+              );
+            })}
+          </div>
+          <button className="btn-save" onClick={saveNew} disabled={!newName.trim()}>
+            Create template
+          </button>
+        </div>
+
+        {templates.length === 0 ? (
+          <p className="archive-empty">No templates yet.</p>
+        ) : (
+          <ul className="archive-list tpl-manage-list">
+            {templates.map(t => {
+              const overlap = t.weekdays
+                .map(d => claimedBy(d, t.id))
+                .filter(Boolean) as BoardTemplate[];
+              return (
+                <li key={t.id} className={`tpl-manage-item${t.id === activeTemplateId ? ' is-active' : ''}`}>
+                  <input
+                    className="tpl-name-input"
+                    value={t.name}
+                    onChange={e => onRename(t.id, e.target.value)}
+                  />
+                  <div className="tpl-weekday-row">
+                    {WEEKDAY_LABELS.map((lbl, d) => {
+                      const clash = claimedBy(d, t.id);
+                      return (
+                        <button
+                          key={d}
+                          type="button"
+                          className={`tpl-day${t.weekdays.includes(d) ? ' on' : ''}${clash ? ' clash' : ''}`}
+                          title={clash ? `Also used by “${clash.name}”` : WEEKDAY_NAMES[d]}
+                          onClick={() => {
+                            const next = t.weekdays.includes(d)
+                              ? t.weekdays.filter(x => x !== d)
+                              : [...t.weekdays, d].sort((a, b) => a - b);
+                            onSetWeekdays(t.id, next);
+                          }}
+                        >{lbl}</button>
+                      );
+                    })}
+                  </div>
+                  {overlap.length > 0 && (
+                    <p className="tpl-overlap-warn">
+                      Overlaps {overlap.map(o => o.name).join(', ')} — first match wins each day.
+                    </p>
+                  )}
+                  <div className="tpl-manage-actions">
+                    <button className="btn-restore" onClick={() => onApply(t.id)}>Apply</button>
+                    <button
+                      className="btn-update-tpl"
+                      onClick={() => onUpdate(t.id)}
+                      title="Overwrite this template with the current board layout, levels, and disables"
+                    >
+                      Update
+                    </button>
+                    <button
+                      className="btn-delete-perm"
+                      onClick={() => {
+                        if (!window.confirm(`Delete template “${t.name}”?`)) return;
+                        onDelete(t.id);
+                      }}
+                      title="Delete template"
+                    >
+                      <TrashIcon />
+                    </button>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+// ─── SyncHistoryPanel — restore one of the previous 3 cloud commits ───────────
+
+interface SyncHistoryPanelProps {
+  onRestore: (sha: string) => Promise<void>;
+  onClose: () => void;
+}
+
+function SyncHistoryPanel({ onRestore, onClose }: SyncHistoryPanelProps) {
+  const [commits, setCommits] = useState<GistCommit[] | null>(null);
+  const [error, setError]     = useState<string | null>(null);
+  const [busy, setBusy]       = useState<string | null>(null);
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [onClose]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const result = await listGistCommits(4);
+      if (cancelled) return;
+      if (!result.ok) {
+        setError(result.error);
+        setCommits([]);
+        return;
+      }
+      // Skip index 0 (current HEAD); offer the previous three.
+      setCommits(result.data.slice(1, 4));
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const restore = async (sha: string) => {
+    if (!window.confirm('Replace your current data with this earlier cloud version? Your current state will be overwritten and synced.')) return;
+    setBusy(sha);
+    try {
+      await onRestore(sha);
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return createPortal(
+    <div className="archive-overlay" onClick={onClose}>
+      <div className="archive-panel" onClick={e => e.stopPropagation()}>
+        <div className="archive-panel-header">
+          <div className="archive-panel-title-group">
+            <HistoryIcon />
+            <span className="archive-panel-title">Cloud history</span>
+          </div>
+          <button className="archive-close-btn" onClick={onClose}>✕</button>
+        </div>
+        <p className="history-hint">
+          Go back up to three previous syncs — useful if another computer overwrote your data.
+        </p>
+        {error && <p className="history-error">{error}</p>}
+        {commits === null ? (
+          <p className="archive-empty">Loading revisions…</p>
+        ) : commits.length === 0 ? (
+          <p className="archive-empty">No earlier versions yet. Sync a few times first.</p>
+        ) : (
+          <ul className="archive-list">
+            {commits.map((c, i) => (
+              <li key={c.version} className="archive-item history-item">
+                <div className="history-item-meta">
+                  <span className="history-item-label">
+                    {i === 0 ? 'Previous sync' : i === 1 ? '2 syncs ago' : '3 syncs ago'}
+                  </span>
+                  <span className="history-item-time">{formatRelativeTime(c.committed_at)}</span>
+                </div>
+                <button
+                  className="btn-restore"
+                  disabled={busy !== null}
+                  onClick={() => restore(c.version)}
+                >
+                  {busy === c.version ? 'Restoring…' : 'Restore'}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+// ─── HabitHistoryPanel — browse definition snapshots for one habit ────────────
+
+interface HabitHistoryPanelProps {
+  habitName: string;
+  snapshots: HabitSnapshot[];
+  onRestore: (snap: HabitSnapshot) => void;
+  onClose: () => void;
+}
+
+function HabitHistoryPanel({ habitName, snapshots, onRestore, onClose }: HabitHistoryPanelProps) {
+  const [expanded, setExpanded] = useState<string | null>(null);
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [onClose]);
+
+  const sorted = useMemo(
+    () => [...snapshots].sort((a, b) => b.at.localeCompare(a.at)),
+    [snapshots],
+  );
+
+  return createPortal(
+    <div className="archive-overlay" onClick={onClose}>
+      <div className="archive-panel habit-history-panel" onClick={e => e.stopPropagation()}>
+        <div className="archive-panel-header">
+          <div className="archive-panel-title-group">
+            <HistoryIcon />
+            <span className="archive-panel-title">History — {habitName}</span>
+          </div>
+          <button className="archive-close-btn" onClick={onClose}>✕</button>
+        </div>
+        <p className="history-hint">
+          Snapshots are saved whenever you edit this habit’s name, levels, price, or schedule.
+        </p>
+        {sorted.length === 0 ? (
+          <p className="archive-empty">No snapshots yet. Edit and save this habit to start a timeline.</p>
+        ) : (
+          <ul className="archive-list">
+            {sorted.map(s => {
+              const open = expanded === s.id;
+              const levelNames = [
+                s.name,
+                ...(s.levels ?? []).map(l => l.name),
+              ].filter(Boolean);
+              return (
+                <li key={s.id} className="habit-snap-item">
+                  <button
+                    className="habit-snap-header"
+                    onClick={() => setExpanded(open ? null : s.id)}
+                  >
+                    <div
+                      className="archive-color-dot"
+                      style={{ backgroundColor: getPalette(s.color)[5] }}
+                    />
+                    <div className="habit-snap-summary">
+                      <span className="habit-snap-name">{s.name}</span>
+                      <span className="habit-snap-when">{formatSnapshotWhen(s.at)}</span>
+                    </div>
+                    <span className="habit-snap-chevron">{open ? '▾' : '▸'}</span>
+                  </button>
+                  {open && (
+                    <div className="habit-snap-body">
+                      <div className="habit-snap-row">
+                        <span>Base price</span>
+                        <span>${(s.price ?? DEFAULT_PRICE).toFixed(2)}</span>
+                      </div>
+                      {levelNames.length > 1 && (
+                        <div className="habit-snap-levels">
+                          <span className="habit-snap-levels-label">Levels</span>
+                          <ol>
+                            {levelNames.map((n, i) => {
+                              const price = i === 0
+                                ? (s.price ?? DEFAULT_PRICE)
+                                : (s.levels?.[i - 1]?.price ?? DEFAULT_PRICE);
+                              return (
+                                <li key={i}>{n} · ${price.toFixed(2)}</li>
+                              );
+                            })}
+                          </ol>
+                        </div>
+                      )}
+                      {s.schedule && (
+                        <div className="habit-snap-row">
+                          <span>Schedule</span>
+                          <span>
+                            {s.schedule.type === 'daily' && 'Every day'}
+                            {s.schedule.type === 'weekly' && `Weekdays: ${s.schedule.weekdays.join(',')}`}
+                            {s.schedule.type === 'interval' && `Every ${s.schedule.every}d cooldown`}
+                          </span>
+                        </div>
+                      )}
+                      <button
+                        className="btn-restore habit-snap-restore"
+                        onClick={() => {
+                          if (!window.confirm('Restore this habit’s name, levels, and settings from this snapshot? Completions stay as they are.')) return;
+                          onRestore(s);
+                          onClose();
+                        }}
+                      >
+                        Restore this version
+                      </button>
+                    </div>
+                  )}
+                </li>
+              );
+            })}
           </ul>
         )}
       </div>
@@ -700,25 +1539,24 @@ function useAnchoredPosition(
 
 interface EditPanelProps {
   habit: Habit;
-  onSave:     (name: string, color: HabitColor, price: number, bonusPrice: number, sectionBefore: string, levels: HabitLevel[], schedule: HabitSchedule | undefined) => void;
+  snapshotCount: number;
+  onSave:     (name: string, color: HabitColor, price: number, levels: HabitLevel[], schedule: HabitSchedule | undefined) => void;
   onCancel:   () => void;
   onDelete:   () => void;
   onArchive:  () => void;
+  onHistory:  () => void;
 }
 
 // Draft level row in the editor — price kept as string for free typing
 interface LevelDraft { name: string; price: string; }
 
-function EditPanel({ habit, onSave, onCancel, onDelete, onArchive }: EditPanelProps) {
-
-  const [name,          setName]          = useState(habit.name);
-  const [color,         setColor]         = useState<string>(habit.color);
-  const [price,         setPrice]         = useState<string>(String(habit.price      ?? DEFAULT_PRICE));
-  const [bonusPrice,    setBonusPrice]    = useState<string>(String(habit.bonusPrice ?? DEFAULT_BONUS_PRICE));
-  const [sectionBefore, setSectionBefore] = useState(habit.sectionBefore ?? '');
-  const [levels,        setLevels]        = useState<LevelDraft[]>(
-    (habit.levels ?? []).map(l => ({ name: l.name, price: String(l.price) }))
-  );
+function EditPanel({ habit, snapshotCount, onSave, onCancel, onDelete, onArchive, onHistory }: EditPanelProps) {
+  const [color, setColor] = useState<string>(habit.color);
+  // Levels draft always includes the base level as row 0 (habit name + price).
+  const [levels, setLevels] = useState<LevelDraft[]>(() => [
+    { name: habit.name, price: String(habit.price ?? DEFAULT_PRICE) },
+    ...(habit.levels ?? []).map(l => ({ name: l.name, price: String(l.price) })),
+  ]);
   const [schedType,  setSchedType]  = useState<'daily'|'weekly'|'interval'>(habit.schedule?.type ?? 'daily');
   const [weekdays,   setWeekdays]   = useState<number[]>(
     habit.schedule?.type === 'weekly' ? habit.schedule.weekdays : [1, 2, 3, 4, 5]
@@ -730,11 +1568,14 @@ function EditPanel({ habit, onSave, onCancel, onDelete, onArchive }: EditPanelPr
     setWeekdays(ws => ws.includes(d) ? ws.filter(x => x !== d) : [...ws, d]);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const addLevel    = () => setLevels(ls => [...ls, { name: '', price: String(DEFAULT_PRICE) }]);
-  const removeLevel = (idx: number) => setLevels(ls => ls.filter((_, i) => i !== idx));
+  const addLevel = () => setLevels(ls => [...ls, { name: '', price: String(DEFAULT_PRICE) }]);
+  const removeLevel = (idx: number) => setLevels(ls => {
+    if (ls.length <= 1) return ls; // keep at least the base level
+    return ls.filter((_, i) => i !== idx);
+  });
   const updateLevel = (idx: number, patch: Partial<LevelDraft>) =>
     setLevels(ls => ls.map((l, i) => i === idx ? { ...l, ...patch } : l));
-  const moveLevel   = (idx: number, dir: -1 | 1) => setLevels(ls => {
+  const moveLevel = (idx: number, dir: -1 | 1) => setLevels(ls => {
     const j = idx + dir;
     if (j < 0 || j >= ls.length) return ls;
     const next = [...ls];
@@ -765,17 +1606,15 @@ function EditPanel({ habit, onSave, onCancel, onDelete, onArchive }: EditPanelPr
   );
 
   const handleSave = () => {
-    const n = name.trim();
-    if (!n) return;
-    const p  = parseFloat(price);
-    const bp = parseFloat(bonusPrice);
-    // Keep only levels with a name; coerce price to a valid number
+    // Keep named levels; first row is the base (habit name + price), rest are extras.
     const cleanLevels: HabitLevel[] = levels
       .filter(l => l.name.trim())
       .map(l => {
         const lp = parseFloat(l.price);
         return { name: l.name.trim(), price: Number.isFinite(lp) && lp >= 0 ? lp : DEFAULT_PRICE };
       });
+    if (cleanLevels.length === 0) return;
+    const [base, ...extras] = cleanLevels;
     // Build schedule (undefined = every day)
     let schedule: HabitSchedule | undefined;
     if (schedType === 'weekly' && weekdays.length > 0) {
@@ -784,15 +1623,7 @@ function EditPanel({ habit, onSave, onCancel, onDelete, onArchive }: EditPanelPr
       const every = Math.max(1, Math.floor(parseFloat(intervalEvery) || 1));
       schedule = { type: 'interval', every };
     }
-    onSave(
-      n,
-      color,
-      Number.isFinite(p)  && p  >= 0 ? p  : DEFAULT_PRICE,
-      Number.isFinite(bp) && bp >= 0 ? bp : DEFAULT_BONUS_PRICE,
-      sectionBefore.trim(),
-      cleanLevels,
-      schedule,
-    );
+    onSave(base.name, color, base.price, extras, schedule);
   };
 
   return createPortal(
@@ -801,14 +1632,6 @@ function EditPanel({ habit, onSave, onCancel, onDelete, onArchive }: EditPanelPr
       className="edit-panel"
       style={{ top: pos?.top ?? 0, left: pos?.left ?? 0, visibility: pos ? 'visible' : 'hidden' }}
     >
-      <input
-        ref={inputRef}
-        className="edit-panel-input"
-        value={name}
-        onChange={e => setName(e.target.value)}
-        onKeyDown={e => { if (e.key === 'Enter') handleSave(); if (e.key === 'Escape') onCancel(); }}
-        placeholder="Habit name…"
-      />
       <div className="color-pick-row">
         <label className="color-picker-label" title="Pick a color">
           <div className="color-picker-disc" style={{ background: color }} />
@@ -826,38 +1649,10 @@ function EditPanel({ habit, onSave, onCancel, onDelete, onArchive }: EditPanelPr
           ))}
         </div>
       </div>
-      <div className="price-row">
-        <label className="price-field">
-          <span className="price-label">Per completion</span>
-          <span className="price-input-wrap">
-            <span className="price-prefix">$</span>
-            <input
-              type="number" min="0" step="0.05" inputMode="decimal"
-              value={price}
-              onChange={e => setPrice(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter') handleSave(); if (e.key === 'Escape') onCancel(); }}
-            />
-          </span>
-        </label>
-        <label className="price-field">
-          <span className="price-label">Middle-click bonus</span>
-          <span className="price-input-wrap">
-            <span className="price-prefix">$</span>
-            <input
-              type="number" min="0" step="0.25" inputMode="decimal"
-              value={bonusPrice}
-              onChange={e => setBonusPrice(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter') handleSave(); if (e.key === 'Escape') onCancel(); }}
-            />
-          </span>
-        </label>
-      </div>
       <div className="levels-editor">
         <div className="levels-editor-head">
           <span className="levels-editor-title">Levels</span>
-          <span className="levels-editor-hint">
-            base + extras below; after {NORMAL_STREAK_DAYS} on-schedule days a level becomes Normal
-          </span>
+          <span className="levels-editor-hint">first row is the base — reorder freely; extras are bigger versions</span>
         </div>
         {habitHasLevels(habit) && (
           <div className="level-row level-row-base">
@@ -871,17 +1666,19 @@ function EditPanel({ habit, onSave, onCancel, onDelete, onArchive }: EditPanelPr
           </div>
         )}
         {levels.map((lvl, i) => (
-          <div className="level-row" key={i}>
+          <div className={`level-row${i === 0 ? ' level-row-base' : ''}`} key={i}>
             <div className="level-move">
               <button className="level-move-btn" onClick={() => moveLevel(i, -1)} disabled={i === 0} title="Move up">▲</button>
               <button className="level-move-btn" onClick={() => moveLevel(i, 1)} disabled={i === levels.length - 1} title="Move down">▼</button>
             </div>
+            {i === 0 && <span className="level-base-tag">Base</span>}
             <input
+              ref={i === 0 ? inputRef : undefined}
               className="level-name-input"
               value={lvl.name}
               onChange={e => updateLevel(i, { name: e.target.value })}
               onKeyDown={e => { if (e.key === 'Enter') handleSave(); if (e.key === 'Escape') onCancel(); }}
-              placeholder={`Level ${i + 1} name…`}
+              placeholder={i === 0 ? 'Base level name…' : `Level ${i + 1} name…`}
             />
             <span className="level-price-wrap">
               <span className="price-prefix">$</span>
@@ -893,10 +1690,12 @@ function EditPanel({ habit, onSave, onCancel, onDelete, onArchive }: EditPanelPr
                 onKeyDown={e => { if (e.key === 'Enter') handleSave(); if (e.key === 'Escape') onCancel(); }}
               />
             </span>
-            {habitHasLevels(habit) && normalLevelOf(habit) === i + 1 && (
-              <span className="level-normal-badge" title="Current normal level">Normal</span>
-            )}
-            <button className="level-remove" onClick={() => removeLevel(i)} title="Remove level">✕</button>
+            <button
+              className="level-remove"
+              onClick={() => removeLevel(i)}
+              disabled={levels.length <= 1}
+              title={levels.length <= 1 ? 'Base level required' : 'Remove level'}
+            >✕</button>
           </div>
         ))}
         <button className="level-add" onClick={addLevel}>+ Add level</button>
@@ -942,22 +1741,17 @@ function EditPanel({ habit, onSave, onCancel, onDelete, onArchive }: EditPanelPr
           </div>
         )}
       </div>
-      <div className="section-label-row">
-        <span className="section-label-prefix">§</span>
-        <input
-          className="section-label-input"
-          value={sectionBefore}
-          onChange={e => setSectionBefore(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter') handleSave(); if (e.key === 'Escape') onCancel(); }}
-          placeholder="Section above this habit (leave blank for none)…"
-        />
-        {sectionBefore && (
-          <button className="section-label-clear" onClick={() => setSectionBefore('')} title="Remove section">✕</button>
-        )}
-      </div>
       <div className="edit-panel-actions">
         <button className="btn-save" onClick={handleSave}>Save</button>
         <button className="btn-cancel" onClick={onCancel}>Cancel</button>
+        <button
+          className="btn-history"
+          onClick={onHistory}
+          title={snapshotCount > 0 ? `View ${snapshotCount} snapshot${snapshotCount === 1 ? '' : 's'}` : 'View habit history'}
+        >
+          <HistoryIcon />
+          {snapshotCount > 0 && <span className="btn-history-count">{snapshotCount}</span>}
+        </button>
         <button className="btn-archive" onClick={onArchive} title="Archive habit">
           <ArchiveIcon />
         </button>
@@ -1008,7 +1802,7 @@ function LevelPicker({ habit, onPick, onClose }: LevelPickerProps) {
       style={{ top: pos?.top ?? 0, left: pos?.left ?? 0, visibility: pos ? 'visible' : 'hidden' }}
     >
       <div className="level-picker-head">Active level for <strong>{habit.name}</strong></div>
-      <div className="level-picker-sub">New completions use this level. Middle-click a day for the top level.</div>
+      <div className="level-picker-sub">New completions use this level.</div>
       {levels.map((lvl, i) => (
         <button
           key={i}
@@ -1086,17 +1880,136 @@ function AddPanel({ anchorRef, onAdd, onClose }: {
   );
 }
 
+// ─── SectionRow — independent movable board header ───────────────────────────
+
+interface SectionRowProps {
+  section: BoardSection;
+  editMode: boolean;
+  isDragging: boolean;
+  isDragOver: boolean;
+  sectionHidden: boolean;
+  canHideForBoard: boolean;
+  onRename: (id: string, label: string) => void;
+  onDelete: (id: string) => void;
+  onToggleHidden: (id: string) => void;
+  onDragStartRow: (id: string) => void;
+  onDragOverRow:  (id: string) => void;
+  onDropRow:      (srcId: string, targetId: string) => void;
+  onDragEndRow:   () => void;
+}
+
+const SectionRow = memo(function SectionRow({
+  section, editMode, isDragging, isDragOver, sectionHidden, canHideForBoard,
+  onRename, onDelete, onToggleHidden, onDragStartRow, onDragOverRow, onDropRow, onDragEndRow,
+}: SectionRowProps) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(section.label);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => { setDraft(section.label); }, [section.label]);
+  useEffect(() => {
+    if (editing) {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    }
+  }, [editing]);
+
+  const commit = () => {
+    const next = draft.trim();
+    if (next && next !== section.label) onRename(section.id, next);
+    else setDraft(section.label);
+    setEditing(false);
+  };
+
+  return (
+    <div
+      className={`section-divider${editMode ? ' section-editable' : ''}${isDragging ? ' dragging' : ''}${isDragOver ? ' drag-over' : ''}${sectionHidden ? ' section-hidden' : ''}`}
+      draggable={editMode && !editing}
+      onDragStart={editMode && !editing ? e => {
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', section.id);
+        onDragStartRow(section.id);
+      } : undefined}
+      onDragEnter={editMode ? e => { e.preventDefault(); onDragOverRow(section.id); } : undefined}
+      onDragOver={editMode ? e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; } : undefined}
+      onDrop={editMode ? e => {
+        e.preventDefault();
+        const src = e.dataTransfer.getData('text/plain');
+        if (src) onDropRow(src, section.id);
+      } : undefined}
+      onDragEnd={editMode ? () => onDragEndRow() : undefined}
+    >
+      {editMode && <span className="drag-grip section-grip" title="Drag to reorder"><GripIcon /></span>}
+      <span className="section-divider-line" />
+      {editing ? (
+        <input
+          ref={inputRef}
+          className="section-divider-input"
+          value={draft}
+          onChange={e => setDraft(e.target.value)}
+          onBlur={commit}
+          onKeyDown={e => {
+            if (e.key === 'Enter') commit();
+            if (e.key === 'Escape') { setDraft(section.label); setEditing(false); }
+          }}
+        />
+      ) : (
+        <button
+          type="button"
+          className="section-divider-label"
+          onClick={editMode ? () => setEditing(true) : undefined}
+          disabled={!editMode}
+          title={editMode ? 'Click to rename' : sectionHidden ? 'Hidden on this board' : undefined}
+        >
+          {section.label}
+        </button>
+      )}
+      <span className="section-divider-line" />
+      {editMode && (
+        <div className="section-actions">
+          <button
+            className="section-edit-btn"
+            onClick={() => setEditing(true)}
+            title="Edit section name"
+          >
+            <PencilIcon />
+          </button>
+          {canHideForBoard && (
+            <button
+              className={`section-disable-btn${sectionHidden ? ' is-off' : ''}`}
+              onClick={() => onToggleHidden(section.id)}
+              title={sectionHidden ? 'Show section on this board' : 'Hide section on this board (habits stay)'}
+            >
+              {sectionHidden ? <EyeOffIcon /> : <EyeIcon />}
+            </button>
+          )}
+          <button
+            className="section-delete-btn"
+            onClick={() => onDelete(section.id)}
+            title="Delete section"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+    </div>
+  );
+});
+
 // ─── HabitRow ─────────────────────────────────────────────────────────────────
 
 interface RowProps {
   habit: Habit;
   dates: Date[];
   isCurrentDay: boolean;
+  isDue: DueFn;
+  boardDisabled: boolean;
+  canToggleBoardDisable: boolean;
   onToggle:         (id: string, ds: string) => void;
-  onMiddleToggle:   (id: string, ds: string) => void;
   onRightClick:     (id: string, ds: string, rect: DOMRect) => void;
   onCommentHover:   (text: string, ds: string, rect: DOMRect) => void;
   onCommentLeave:   () => void;
+  onToggleBoardDisable: (id: string) => void;
   editMode: boolean;
   isEditing: boolean;
   onOpenEdit: () => void;
@@ -1111,7 +2024,8 @@ interface RowProps {
 }
 
 const HabitRow = memo(function HabitRow(
-  { habit, dates, isCurrentDay, onToggle, onMiddleToggle, onRightClick, onCommentHover, onCommentLeave,
+  { habit, dates, isCurrentDay, isDue, boardDisabled, canToggleBoardDisable,
+    onToggle, onRightClick, onCommentHover, onCommentLeave, onToggleBoardDisable,
     editMode, isEditing, onOpenEdit, onOpenLevelPicker, analyticsView,
     isDragging, isDragOver, onDragStartRow, onDragOverRow, onDropRow, onDragEndRow }: RowProps
 ) {
@@ -1119,7 +2033,12 @@ const HabitRow = memo(function HabitRow(
   const comp  = useMemo(() => new Set(habit.completions), [habit.completions]);
   const skip  = useMemo(() => new Set(habit.skips),       [habit.skips]);
   const fail  = useMemo(() => new Set(habit.fails),       [habit.fails]);
-  const bonus = useMemo(() => new Set(habit.bonuses ?? []), [habit.bonuses]);
+  const cur  = useMemo(() => calcCurrentStreak(habit, isDue), [habit, isDue]);
+  const lon  = useMemo(() => calcLongestStreak(habit, isDue), [habit, isDue]);
+  const acc  = getAccent(habit.color);
+  const doneToday = comp.has(fmt(todayNoon()));   // completed for today?
+  const urgeMax   = lon > 0 && cur >= lon && !doneToday; // at record run but today not done yet
+
   const hasLevels   = habitHasLevels(habit);
   const levels      = useMemo(() => effectiveLevels(habit), [habit]); // base + extras
   const dayLevels   = habit.dayLevels ?? {};
@@ -1135,7 +2054,8 @@ const HabitRow = memo(function HabitRow(
   const urgeMax = lvlMax > 0 && lvlCur >= lvlMax && todayScheduled && !doneTodayAtNormal;
 
   // Sidebar name is clickable (to pick level) only in non-edit mode with levels defined
-  const nameClickable = hasLevels && !editMode;
+  const nameClickable = hasLevels && !editMode && !boardDisabled;
+  const activeLevelIdx = Math.min(habit.activeLevel ?? 0, Math.max(0, levels.length - 1));
   const displayName = hasLevels ? levels[activeLevelIdx].name : habit.name;
 
   const wkCnt  = useMemo(() => countFrom(habit.completions, startOfWeek()),  [habit.completions]);
@@ -1150,7 +2070,7 @@ const HabitRow = memo(function HabitRow(
       <div
         ref={nameRef}
         data-hid={habit.id}
-        className={`cell habit-name${isEditing ? ' editing' : ''}${editMode ? ' draggable' : ''}${isDragging ? ' dragging' : ''}${isDragOver ? ' drag-over' : ''}`}
+        className={`cell habit-name${isEditing ? ' editing' : ''}${editMode ? ' draggable' : ''}${isDragging ? ' dragging' : ''}${isDragOver ? ' drag-over' : ''}${boardDisabled ? ' board-disabled' : ''}`}
         draggable={editMode}
         onDragStart={editMode ? e => {
           e.dataTransfer.effectAllowed = 'move';
@@ -1176,16 +2096,29 @@ const HabitRow = memo(function HabitRow(
             <span className="habit-name-text">{displayName}</span>
           </button>
         ) : (
-          <span className="habit-name-text">{displayName}</span>
+          <span className="habit-name-text" title={boardDisabled ? 'Disabled on this board' : undefined}>
+            {displayName}
+          </span>
         )}
         {editMode && (
-          <button
-            className="edit-icon-btn"
-            onClick={() => onOpenEdit()}
-            title="Edit habit"
-          >
-            <PencilIcon />
-          </button>
+          <>
+            {canToggleBoardDisable && (
+              <button
+                className={`board-disable-btn${boardDisabled ? ' is-off' : ''}`}
+                onClick={() => onToggleBoardDisable(habit.id)}
+                title={boardDisabled ? 'Enable on this board' : 'Disable on this board (keeps streak)'}
+              >
+                {boardDisabled ? <EyeOffIcon /> : <EyeIcon />}
+              </button>
+            )}
+            <button
+              className="edit-icon-btn"
+              onClick={() => onOpenEdit()}
+              title="Edit habit"
+            >
+              <PencilIcon />
+            </button>
+          </>
         )}
       </div>
 
@@ -1194,13 +2127,8 @@ const HabitRow = memo(function HabitRow(
         const done  = comp.has(ds);
         const skpd  = skip.has(ds);
         const faild = fail.has(ds);
-        const bns   = done && bonus.has(ds);
-        const str   = (done || skpd) ? streakAt(habit, ds) : 0;
-        const dayLvl = (done && hasLevels) ? Math.min(dayLevels[ds] ?? 0, levels.length - 1) : 0;
-        const shadePenalty = (done && hasLevels && dayLvl < activeLevelIdx)
-          ? (activeLevelIdx - dayLvl)
-          : 0;
-        const bg    = cellBg(str, habit.color, shadePenalty);
+        const str   = (done || skpd) ? streakAt(habit, ds, isDue) : 0;
+        const bg    = cellBg(str, habit.color);
         const isTd  = isCurrentDay && i === dates.length - 1;
 
         const prevDs = i > 0 ? fmt(dates[i - 1]) : null;
@@ -1217,19 +2145,15 @@ const HabitRow = memo(function HabitRow(
         const showLevelPips = done && hasLevels;
         const isMaxLevel = showLevelPips && dayLvl >= levels.length - 1;
 
-        // Off-day: this habit isn't scheduled on this date and nothing's logged.
-        const offDay = !done && !skpd && !faild && !isScheduledOn(habit, ds);
+        // Off-day: not due on this board/schedule and nothing's logged.
+        const offDay = !done && !skpd && !faild && !isDue(habit, ds);
 
         return (
           <div
             key={`${habit.id}-${i}`}
-            className={`cell habit-cell${isTd ? ' today-col' : ''}${faild ? ' failed-cell' : ''}${hasComment ? ' has-comment' : ''}${bns ? ' bonus-cell' : ''}${offDay ? ' off-day' : ''}`}
-            style={bns ? undefined : done ? { backgroundColor: bg } : faild ? { '--fail-color': acc } as React.CSSProperties : undefined}
+            className={`cell habit-cell${isTd ? ' today-col' : ''}${faild ? ' failed-cell' : ''}${hasComment ? ' has-comment' : ''}${offDay ? ' off-day' : ''}`}
+            style={done ? { backgroundColor: bg } : faild ? { '--fail-color': acc } as React.CSSProperties : undefined}
             onClick={() => onToggle(habit.id, ds)}
-            onMouseDown={e => { if (e.button === 1) e.preventDefault(); }}
-            onAuxClick={e => {
-              if (e.button === 1) { e.preventDefault(); onMiddleToggle(habit.id, ds); }
-            }}
             onContextMenu={e => {
               e.preventDefault();
               onRightClick(habit.id, ds, (e.currentTarget as HTMLElement).getBoundingClientRect());
@@ -1244,8 +2168,7 @@ const HabitRow = memo(function HabitRow(
             {showLeft  && <div className="cell-skip cell-skip-left"  style={{ background: bg }} />}
             {showRight && <div className="cell-skip cell-skip-right" style={{ background: bg }} />}
             {faild && <div className="cell-fail" />}
-            {bns && <span className="cell-money">$</span>}
-            {showLevelPips && (
+            {showLevelBar && (
               <div
                 className={`cell-level-pips${isMaxLevel ? ' is-max' : ''}`}
                 title={`${levels[dayLvl].name} · $${levels[dayLvl].price.toFixed(2)}`}
@@ -1262,16 +2185,21 @@ const HabitRow = memo(function HabitRow(
               </div>
             )}
             {hasComment && (() => {
-              const pal = getPalette(habit.color);
-              const shadeIdx = Math.max(0, intensityIdx(str) - shadePenalty);
-              // On colored cells: dot is 1-2 shades deeper than cell bg.
-              // On empty/failed: dot is a light-mid tint of the habit color.
-              const dotBg   = (done || skpd) ? pal[Math.min(shadeIdx + 2, 7)] : pal[2];
-              const dotRing = (done || skpd) ? pal[Math.min(shadeIdx + 1, 7)] : pal[4];
+              // Accent fill + white ring so the dot stays visible on maxed-out
+              // streak cells (same palette shade would otherwise blend in).
+              const dense = (done || skpd) && intensityIdx(str) >= 5;
               return (
                 <div
                   className="comment-dot"
-                  style={{ background: dotBg, boxShadow: `0 0 0 1.5px ${dotRing}` }}
+                  style={dense
+                    ? {
+                        background: '#fff',
+                        boxShadow: `0 0 0 1.5px ${getAccent(habit.color)}, 0 1px 2px rgba(15,23,42,0.35)`,
+                      }
+                    : {
+                        background: getAccent(habit.color),
+                        boxShadow: '0 0 0 1.5px #fff, 0 0 0 2.5px rgba(15,23,42,0.3)',
+                      }}
                 />
               );
             })()}
@@ -1321,7 +2249,7 @@ const HabitRow = memo(function HabitRow(
 
 // ─── Daily Progress (gamified) ──────────────────────────────────────────────
 
-interface DayPip { id: string; name: string; color: string; done: boolean; bonus: boolean; earned: number; }
+interface DayPip { id: string; name: string; color: string; done: boolean; earned: number; }
 
 const DailyProgress = memo(function DailyProgress(
   { pips, done, total, viewingToday, daySeed, earned, dayStreak, tools }: {
@@ -1383,12 +2311,10 @@ const DailyProgress = memo(function DailyProgress(
           {pips.map(p => (
             <span
               key={p.id}
-              className={`dp-pip${p.done ? ' filled' : ''}${p.bonus ? ' bonus' : ''}`}
-              style={p.done && !p.bonus ? { background: p.color, boxShadow: `0 0 0 1px ${p.color}` } : undefined}
+              className={`dp-pip${p.done ? ' filled' : ''}`}
+              style={p.done ? { background: p.color, boxShadow: `0 0 0 1px ${p.color}` } : undefined}
               title={`${p.name}${p.done ? ` \u2014 $${p.earned.toFixed(2)}` : ''}`}
-            >
-              {p.bonus ? '$' : ''}
-            </span>
+            />
           ))}
           {total === 0 && <span className="dp-pip-empty">No habits yet</span>}
         </div>
@@ -1408,12 +2334,8 @@ const DailyProgress = memo(function DailyProgress(
 // ─── MoneyMenu — top-right balance with a hover "spend" popover ──────────────
 
 const MoneyMenu = memo(function MoneyMenu(
-  { earned, spent, lastSpend, onSpend, onUndo }: {
-    earned: number;
-    spent: number;
-    lastSpend: number;
-    onSpend: (amt: number) => void;
-    onUndo: () => void;
+  { earned, spent, lastSpend, onSpend }: {
+    earned: number; spent: number; lastSpend: number; onSpend: (amt: number) => void;
   }
 ) {
   const [open, setOpen] = useState(false);
@@ -1446,7 +2368,7 @@ const MoneyMenu = memo(function MoneyMenu(
             <div className="money-menu-row">
               <span>Last spent</span>
               <span className="mm-neg">
-                {lastSpend > 0 ? `−$${lastSpend.toFixed(2)}` : '—'}
+                {lastSpend > 0 ? `-$${lastSpend.toFixed(2)}` : '$0.00'}
               </span>
             </div>
             <div className="money-menu-row money-menu-total"><span>Balance</span><span>${balance.toFixed(2)}</span></div>
@@ -1484,12 +2406,20 @@ const MoneyMenu = memo(function MoneyMenu(
 // ─── App ──────────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const [habits,         setHabits]         = useState<Habit[]>(loadHabits);
+  const [initialBoard] = useState(loadBoard);
+  const [habits,         setHabits]         = useState<Habit[]>(initialBoard.habits);
+  const [sections,       setSections]       = useState<BoardSection[]>(initialBoard.sections);
+  const [boardOrder,     setBoardOrder]     = useState<string[]>(initialBoard.boardOrder);
+  const [templates,      setTemplates]      = useState<BoardTemplate[]>(initialBoard.templates);
+  const [activeTemplateId, setActiveTemplateId] = useState<string | null>(initialBoard.activeTemplateId);
+  const [templateOverrideDate, setTemplateOverrideDate] = useState<string | null>(loadTemplateOverrideDate);
+  const [showTemplates,  setShowTemplates]  = useState(false);
   const [offset,         setOffset]         = useState(0);
   /** null = closed; 'footer' / 'end' append among active; otherwise insert before that habit id. */
   const [addPlacement, setAddPlacement] = useState<null | 'footer' | 'end' | string>(null);
   const [spent,          setSpent]          = useState<number>(loadSpent);
   const [lastSpend,      setLastSpend]      = useState<number>(loadLastSpend);
+  const [snapshots,      setSnapshots]      = useState<HabitSnapshot[]>(loadSnapshots);
   const [editMode,       setEditMode]       = useState(false);
   const [showAllHabits,  setShowAllHabits]  = useState(false);
   const [editingId,      setEditingId]      = useState<string | null>(null);
@@ -1499,6 +2429,8 @@ export default function App() {
   const [analyticsView,  setAnalyticsView]  = useState<0 | 1 | 2>(0);
   const [syncStatus,  setSyncStatus]  = useState<'idle'|'syncing'|'synced'|'error'>('idle');
   const [syncToast,   setSyncToast]   = useState<{ type: 'success'|'error'; msg: string } | null>(null);
+  const [showSyncHistory, setShowSyncHistory] = useState(false);
+  const [historyHabitId,  setHistoryHabitId]  = useState<string | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const showToast = useCallback((type: 'success'|'error', msg: string) => {
@@ -1515,7 +2447,13 @@ export default function App() {
   const syncTimer    = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isFirstLoad  = useRef(true);
   const habitsRef    = useRef<Habit[]>(habits);
+  const sectionsRef  = useRef<BoardSection[]>(sections);
+  const boardOrderRef = useRef<string[]>(boardOrder);
+  const templatesRef = useRef<BoardTemplate[]>(templates);
+  const activeTemplateIdRef = useRef<string | null>(activeTemplateId);
   const spentRef     = useRef<number>(spent);
+  const lastSpendRef = useRef<number>(lastSpend);
+  const snapshotsRef = useRef<HabitSnapshot[]>(snapshots);
 
   const vw     = useViewportWidth();
   const layout = useMemo(() => getLayout(vw), [vw]);
@@ -1529,15 +2467,163 @@ export default function App() {
 
   useEffect(() => { localStorage.setItem(SPENT_KEY, String(spent)); spentRef.current = spent; }, [spent]);
   useEffect(() => {
-    if (lastSpend > 0) localStorage.setItem(LAST_SPEND_KEY, String(lastSpend));
-    else localStorage.removeItem(LAST_SPEND_KEY);
+    localStorage.setItem(LAST_SPEND_KEY, String(lastSpend));
+    lastSpendRef.current = lastSpend;
   }, [lastSpend]);
+  useEffect(() => {
+    localStorage.setItem(SNAPSHOTS_KEY, JSON.stringify(snapshots));
+    snapshotsRef.current = snapshots;
+  }, [snapshots]);
+  useEffect(() => {
+    saveTemplateOverrideDate(templateOverrideDate);
+  }, [templateOverrideDate]);
+
+  const buildPayload = useCallback((): SyncPayload => ({
+    habits: habitsRef.current,
+    sections: sectionsRef.current,
+    boardOrder: boardOrderRef.current,
+    templates: templatesRef.current,
+    activeTemplateId: activeTemplateIdRef.current,
+    spent: spentRef.current,
+    lastSpend: lastSpendRef.current,
+    snapshots: snapshotsRef.current,
+  }), []);
+
+  const applyBoard = useCallback((board: BoardState) => {
+    setHabits(board.habits);
+    setSections(board.sections);
+    setBoardOrder(board.boardOrder);
+    setTemplates(board.templates);
+    setActiveTemplateId(board.activeTemplateId);
+  }, []);
+
+  const applyTemplateById = useCallback((id: string, asOverride: boolean) => {
+    const tpl = templatesRef.current.find(t => t.id === id);
+    if (!tpl) return;
+    const layout = layoutFromTemplate(tpl, habitsRef.current, sectionsRef.current);
+    setSections(layout.sections);
+    setBoardOrder(layout.boardOrder);
+    setActiveTemplateId(tpl.id);
+    if (tpl.habitLevels && Object.keys(tpl.habitLevels).length) {
+      setHabits(prev => prev.map(h => {
+        if (!habitHasLevels(h)) return h;
+        const lvl = tpl.habitLevels![h.id];
+        if (lvl == null || typeof lvl !== 'number') return h;
+        const max = effectiveLevels(h).length - 1;
+        return { ...h, activeLevel: Math.min(Math.max(0, Math.floor(lvl)), max) };
+      }));
+    }
+    if (asOverride) {
+      setTemplateOverrideDate(fmt(todayNoon()));
+    }
+  }, []);
+
+  const saveCurrentAsTemplate = useCallback((name: string, weekdays: number[]) => {
+    const active = templatesRef.current.find(t => t.id === activeTemplateIdRef.current);
+    const tpl = snapshotTemplateFromBoard(
+      name,
+      boardOrderRef.current,
+      sectionsRef.current,
+      habitsRef.current,
+      weekdays,
+      active?.disabledHabitIds ?? [],
+      active?.hiddenSectionIds ?? [],
+    );
+    // Claiming weekdays removes them from other templates
+    setTemplates(prev => {
+      const cleared = prev.map(t => ({
+        ...t,
+        weekdays: t.weekdays.filter(d => !weekdays.includes(d)),
+      }));
+      return [...cleared, tpl];
+    });
+    setActiveTemplateId(tpl.id);
+    showToast('success', `Created template “${tpl.name}”`);
+  }, [showToast]);
+
+  /** Overwrite an existing template with the current board (keeps name + weekdays). */
+  const updateTemplateFromBoard = useCallback((id: string) => {
+    const existing = templatesRef.current.find(t => t.id === id);
+    if (!existing) return;
+    const active = templatesRef.current.find(t => t.id === activeTemplateIdRef.current);
+    const snap = snapshotTemplateFromBoard(
+      existing.name,
+      boardOrderRef.current,
+      sectionsRef.current,
+      habitsRef.current,
+      existing.weekdays,
+      active?.disabledHabitIds ?? existing.disabledHabitIds ?? [],
+      active?.hiddenSectionIds ?? existing.hiddenSectionIds ?? [],
+    );
+    setTemplates(prev => prev.map(t => {
+      if (t.id !== id) return t;
+      return {
+        ...t,
+        boardOrder: snap.boardOrder,
+        sections: snap.sections,
+        habitLevels: snap.habitLevels,
+        disabledHabitIds: snap.disabledHabitIds,
+        hiddenSectionIds: snap.hiddenSectionIds,
+      };
+    }));
+    showToast('success', `Updated “${existing.name}” from current board`);
+  }, [showToast]);
+
+  const toggleBoardDisable = useCallback((habitId: string) => {
+    const tid = activeTemplateIdRef.current;
+    if (!tid) {
+      showToast('error', 'Select or save a board template first');
+      return;
+    }
+    setTemplates(prev => prev.map(t => {
+      if (t.id !== tid) return t;
+      const set = new Set(t.disabledHabitIds ?? []);
+      if (set.has(habitId)) set.delete(habitId);
+      else set.add(habitId);
+      const disabledHabitIds = [...set];
+      return { ...t, disabledHabitIds: disabledHabitIds.length ? disabledHabitIds : undefined };
+    }));
+  }, [showToast]);
+
+  const toggleSectionHidden = useCallback((sectionId: string) => {
+    const tid = activeTemplateIdRef.current;
+    if (!tid) {
+      showToast('error', 'Select or save a board template first');
+      return;
+    }
+    setTemplates(prev => prev.map(t => {
+      if (t.id !== tid) return t;
+      const set = new Set(t.hiddenSectionIds ?? []);
+      if (set.has(sectionId)) set.delete(sectionId);
+      else set.add(sectionId);
+      const hiddenSectionIds = [...set];
+      return { ...t, hiddenSectionIds: hiddenSectionIds.length ? hiddenSectionIds : undefined };
+    }));
+  }, [showToast]);
+
+  const renameTemplate = useCallback((id: string, name: string) => {
+    const n = name.trim();
+    if (!n) return;
+    setTemplates(prev => prev.map(t => t.id === id ? { ...t, name: n } : t));
+  }, []);
+
+  const setTemplateWeekdays = useCallback((id: string, weekdays: number[]) => {
+    setTemplates(prev => prev.map(t => {
+      if (t.id === id) return { ...t, weekdays };
+      // Steal claimed days from others
+      return { ...t, weekdays: t.weekdays.filter(d => !weekdays.includes(d)) };
+    }));
+  }, []);
+
+  const deleteTemplate = useCallback((id: string) => {
+    setTemplates(prev => prev.filter(t => t.id !== id));
+    setActiveTemplateId(cur => cur === id ? null : cur);
+  }, []);
 
   const spend = useCallback((amt: number) => {
-    const rounded = Math.round(amt * 100) / 100;
-    setSpent(s => Math.max(0, Math.round((s + rounded) * 100) / 100));
-    if (rounded > 0) setLastSpend(rounded);
-    else if (rounded < 0) setLastSpend(0); // reset / undo-via-negative clears last spend
+    setSpent(s => Math.max(0, Math.round((s + amt) * 100) / 100));
+    if (amt > 0) setLastSpend(Math.round(amt * 100) / 100);
+    else setLastSpend(0);
   }, []);
 
   const undoLastSpend = useCallback(() => {
@@ -1549,32 +2635,43 @@ export default function App() {
 
   // Persist locally + debounce cloud push (silent background — errors shown via dot only)
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(habits));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      habits, sections, boardOrder, templates, activeTemplateId,
+    }));
     if (isFirstLoad.current) return;
     if (!isSyncConfigured()) return;
     if (syncTimer.current) clearTimeout(syncTimer.current);
     setSyncStatus('syncing');
     syncTimer.current = setTimeout(() => {
-      pushRemote({ habits, spent: spentRef.current }).then(result => {
+      pushRemote(buildPayload()).then(result => {
         setSyncStatus(result.ok ? 'synced' : 'error');
       });
     }, 1500);
-  }, [habits]);
+  }, [habits, sections, boardOrder, templates, activeTemplateId, buildPayload]);
 
-  // Also push when spent changes (debounced separately)
+  // Also push when spent / lastSpend / snapshots change (debounced separately)
   const spentSyncTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     if (isFirstLoad.current) return;
     if (!isSyncConfigured()) return;
     if (spentSyncTimer.current) clearTimeout(spentSyncTimer.current);
     spentSyncTimer.current = setTimeout(() => {
-      pushRemote({ habits: habitsRef.current, spent }).then(result => {
+      pushRemote(buildPayload()).then(result => {
         setSyncStatus(result.ok ? 'synced' : 'error');
       });
     }, 1500);
-  }, [spent]);
+  }, [spent, lastSpend, snapshots, buildPayload]);
 
-  useEffect(() => { habitsRef.current = habits; spentRef.current = spent; }, [habits, spent]);
+  useEffect(() => {
+    habitsRef.current = habits;
+    sectionsRef.current = sections;
+    boardOrderRef.current = boardOrder;
+    templatesRef.current = templates;
+    activeTemplateIdRef.current = activeTemplateId;
+    spentRef.current = spent;
+    lastSpendRef.current = lastSpend;
+    snapshotsRef.current = snapshots;
+  }, [habits, sections, boardOrder, templates, activeTemplateId, spent, lastSpend, snapshots]);
 
   useEffect(() => {
     if (!isSyncConfigured()) return;
@@ -1582,28 +2679,21 @@ export default function App() {
     fetchRemote<unknown>()
       .then(result => {
         if (!result.ok) { setSyncStatus('error'); return; }
-        // Payload can be either legacy (raw array) or new { habits, spent } shape
-        const raw = result.data;
-        const rawHabits = Array.isArray(raw) ? raw
-          : (raw && typeof raw === 'object' && Array.isArray((raw as { habits?: unknown }).habits))
-            ? (raw as { habits: unknown[] }).habits
-            : null;
-        const remoteSpent = (raw && typeof raw === 'object' && typeof (raw as { spent?: unknown }).spent === 'number')
-          ? (raw as { spent: number }).spent
-          : null;
+        const parsed = parseRemotePayload(result.data);
 
-        if (rawHabits && rawHabits.length > 0) {
-          const clean = sanitizeAll(rawHabits);
-          setHabits(clean);
-          if (remoteSpent !== null) setSpent(remoteSpent);
+        if (parsed.board && parsed.board.habits.length > 0) {
+          applyBoard(parsed.board);
+          if (parsed.spent !== null) setSpent(parsed.spent);
+          if (parsed.lastSpend !== null) setLastSpend(parsed.lastSpend);
+          if (parsed.snapshots !== null) setSnapshots(parsed.snapshots);
         } else {
           // Nothing valid on remote — push local state to initialise
-          pushRemote({ habits: habitsRef.current, spent: spentRef.current });
+          pushRemote(buildPayload());
         }
         setSyncStatus('synced');
       })
       .finally(() => { isFirstLoad.current = false; });
-  }, []);
+  }, [buildPayload, applyBoard]);
 
 
   // Remove a date key from a dayLevels map (returns undefined if it empties out)
@@ -1620,7 +2710,6 @@ export default function App() {
       const done = h.completions.includes(ds);
       const skpd = h.skips.includes(ds);
       const fail = h.fails.includes(ds);
-      const dropBonus = (h.bonuses ?? []).filter(b => b !== ds);
       const hasLevels = habitHasLevels(h);
       if (!done && !skpd && !fail) {
         // empty → done: record at the habit's active level (index into effective levels)
@@ -1634,96 +2723,47 @@ export default function App() {
         return hasLevels ? withAutoPromote(next, logged) : next;
       }
       if (done)
-        return { ...h, completions: h.completions.filter(c => c !== ds), skips: [...h.skips, ds], bonuses: dropBonus, dayLevels: dropDayLevel(h.dayLevels, ds) };
+        return { ...h, completions: h.completions.filter(c => c !== ds), skips: [...h.skips, ds], dayLevels: dropDayLevel(h.dayLevels, ds) };
       if (skpd)
         return { ...h, skips: h.skips.filter(s => s !== ds), fails: [...h.fails, ds] };
       return { ...h, fails: h.fails.filter(f => f !== ds) };
     }));
   }, []);
 
-  // Middle-click: complete at the HIGHEST level (or, if no levels, the legacy $1 bonus)
-  const toggleBonus = useCallback((id: string, ds: string) => {
-    setHabits(prev => prev.map(h => {
-      if (h.id !== id) return h;
-      const hasLevels = habitHasLevels(h);
-
-      if (hasLevels) {
-        const topIdx = effectiveLevels(h).length - 1;
-        const alreadyTop = h.completions.includes(ds) && (h.dayLevels?.[ds] ?? 0) === topIdx;
-        if (alreadyTop)
-          // already at top level → clear back to empty
-          return { ...h, completions: h.completions.filter(c => c !== ds), dayLevels: dropDayLevel(h.dayLevels, ds) };
-        const next = {
-          ...h,
-          completions: h.completions.includes(ds) ? h.completions : [...h.completions, ds],
-          skips: h.skips.filter(s => s !== ds),
-          fails: h.fails.filter(f => f !== ds),
-          dayLevels: { ...(h.dayLevels ?? {}), [ds]: topIdx },
-        };
-        return withAutoPromote(next, topIdx);
-      }
-
-      // Legacy behavior: middle-click toggles a $1 bonus completion
-      const bonuses = h.bonuses ?? [];
-      if (bonuses.includes(ds))
-        return { ...h, completions: h.completions.filter(c => c !== ds), bonuses: bonuses.filter(b => b !== ds) };
-      return {
-        ...h,
-        completions: h.completions.includes(ds) ? h.completions : [...h.completions, ds],
-        skips: h.skips.filter(s => s !== ds),
-        fails: h.fails.filter(f => f !== ds),
-        bonuses: [...bonuses, ds],
-      };
-    }));
-  }, []);
-
-  const closeAdd = useCallback(() => {
-    setAddPlacement(null);
-    addAnchorRef.current = null;
-  }, []);
-
-  const openAdd = useCallback((
-    placement: 'footer' | 'end' | string,
-    anchor: HTMLButtonElement | null,
-  ) => {
-    if (addPlacement === placement) { closeAdd(); return; }
-    addAnchorRef.current = anchor;
-    setEditingId(null);
-    setAddPlacement(placement);
-  }, [addPlacement, closeAdd]);
-
   const addHabit = useCallback((name: string, color: string) => {
     const n = name.trim();
     if (!n) return;
-    const newHabit: Habit = {
-      id: `h-${Date.now()}`, name: n, color,
-      completions: [], skips: [], fails: [], bonuses: [],
-    };
-    const beforeId = (addPlacement && addPlacement !== 'footer' && addPlacement !== 'end')
-      ? addPlacement
-      : null;
-    setHabits(prev => {
-      if (beforeId) {
-        const idx = prev.findIndex(h => h.id === beforeId);
-        if (idx >= 0) {
-          const next = [...prev];
-          next.splice(idx, 0, newHabit);
-          return next;
-        }
-      }
-      // Append among active habits (before first archived entry)
-      const archIdx = prev.findIndex(h => h.archived);
-      if (archIdx >= 0) {
-        const next = [...prev];
-        next.splice(archIdx, 0, newHabit);
-        return next;
-      }
-      return [...prev, newHabit];
-    });
-    closeAdd();
-  }, [addPlacement, closeAdd]);
+    const id = `h-${Date.now()}`;
+    setHabits(prev => [...prev, {
+      id, name: n, color,
+      completions: [], skips: [], fails: [],
+    }]);
+    setBoardOrder(prev => [...prev, id]);
+    setAdding(false);
+  }, []);
 
-  const saveEdit = useCallback((name: string, color: HabitColor, price: number, bonusPrice: number, sectionBefore: string, levels: HabitLevel[], schedule: HabitSchedule | undefined) => {
+  const addSection = useCallback(() => {
+    const id = `sec-${Date.now()}`;
+    const label = 'New section';
+    setSections(prev => [...prev, { id, label }]);
+    setBoardOrder(prev => [...prev, id]);
+  }, []);
+
+  const renameSection = useCallback((id: string, label: string) => {
+    setSections(prev => prev.map(s => s.id === id ? { ...s, label } : s));
+  }, []);
+
+  const deleteSection = useCallback((id: string) => {
+    setSections(prev => prev.filter(s => s.id !== id));
+    setBoardOrder(prev => prev.filter(x => x !== id));
+  }, []);
+
+  const saveEdit = useCallback((name: string, color: HabitColor, price: number, levels: HabitLevel[], schedule: HabitSchedule | undefined) => {
+    const nextVals = { name, color, price, levels, schedule };
+    const current = habitsRef.current.find(h => h.id === editingId);
+    if (current && defChanged(current, nextVals)) {
+      setSnapshots(snaps => [snapshotFromHabit(current), ...snaps]);
+    }
     setHabits(prev => prev.map(h => {
       if (h.id !== editingId) return h;
       const hasLevels = levels.length > 0;
@@ -1739,8 +2779,7 @@ export default function App() {
       }
       const activeLevel = hasLevels ? Math.min(h.activeLevel ?? 0, maxIdx) : undefined;
       return {
-        ...h, name, color, price, bonusPrice,
-        sectionBefore: sectionBefore || undefined,
+        ...h, name, color, price,
         levels: hasLevels ? levels : undefined,
         dayLevels,
         activeLevel,
@@ -1750,14 +2789,56 @@ export default function App() {
     setEditingId(null);
   }, [editingId]);
 
-  // Set the currently-active level for a habit (used for new completions)
+  const restoreHabitSnapshot = useCallback((snap: HabitSnapshot) => {
+    const current = habitsRef.current.find(h => h.id === snap.habitId);
+    if (current) {
+      setSnapshots(snaps => [snapshotFromHabit(current), ...snaps]);
+    }
+    setHabits(prev => prev.map(h => {
+      if (h.id !== snap.habitId) return h;
+      const levels = snap.levels?.length ? snap.levels.map(l => ({ ...l })) : undefined;
+      const hasLevels = (levels?.length ?? 0) > 0;
+      const maxIdx = levels?.length ?? 0;
+      let dayLevels = h.dayLevels;
+      if (!hasLevels) {
+        dayLevels = undefined;
+      } else if (dayLevels) {
+        dayLevels = Object.fromEntries(
+          Object.entries(dayLevels).map(([k, v]) => [k, Math.min(v, maxIdx)])
+        );
+      }
+      return {
+        ...h,
+        name: snap.name,
+        color: snap.color,
+        price: snap.price,
+        levels,
+        schedule: snap.schedule ? structuredClone(snap.schedule) : undefined,
+        dayLevels,
+        activeLevel: hasLevels ? Math.min(h.activeLevel ?? 0, maxIdx) : undefined,
+      };
+    }));
+    setEditingId(null);
+    showToast('success', 'Habit restored from snapshot');
+  }, [showToast]);
+
+  // Set the currently-active level for a habit (used for new completions).
+  // Also remember it on the active board template (e.g. lower level on weekends).
   const setActiveLevel = useCallback((id: string, level: number) => {
     setHabits(prev => prev.map(h => h.id === id ? { ...h, activeLevel: level } : h));
+    const tid = activeTemplateIdRef.current;
+    if (!tid) return;
+    setTemplates(prev => prev.map(t => {
+      if (t.id !== tid) return t;
+      return { ...t, habitLevels: { ...t.habitLevels, [id]: level } };
+    }));
   }, []);
 
   const deleteHabit = useCallback(() => {
     if (!window.confirm('Delete this habit?')) return;
-    setHabits(prev => prev.filter(h => h.id !== editingId));
+    const id = editingId;
+    setHabits(prev => prev.filter(h => h.id !== id));
+    if (id) setBoardOrder(prev => prev.filter(x => x !== id));
     setEditingId(null);
   }, [editingId]);
 
@@ -1774,7 +2855,7 @@ export default function App() {
     }
     setSyncStatus('syncing');
     // Push first so remote always has our latest
-    const pushResult = await pushRemote({ habits: habitsRef.current, spent: spentRef.current });
+    const pushResult = await pushRemote(buildPayload());
     if (!pushResult.ok) {
       setSyncStatus('error');
       showToast('error', `Push failed: ${pushResult.error}`);
@@ -1789,31 +2870,72 @@ export default function App() {
     }
     setSyncStatus('synced');
     showToast('success', 'Synced to cloud ✓');
-  }, [showToast]);
+  }, [showToast, buildPayload]);
+
+  const restoreCloudRevision = useCallback(async (sha: string) => {
+    setSyncStatus('syncing');
+    const result = await fetchRevision<unknown>(sha);
+    if (!result.ok) {
+      setSyncStatus('error');
+      showToast('error', `Could not load revision: ${result.error}`);
+      throw new Error(result.error);
+    }
+    const parsed = parseRemotePayload(result.data);
+    if (!parsed.board || parsed.board.habits.length === 0) {
+      setSyncStatus('error');
+      const msg = 'That revision has no habits to restore.';
+      showToast('error', msg);
+      throw new Error(msg);
+    }
+    applyBoard(parsed.board);
+    if (parsed.spent !== null) setSpent(parsed.spent);
+    if (parsed.lastSpend !== null) setLastSpend(parsed.lastSpend);
+    if (parsed.snapshots !== null) setSnapshots(parsed.snapshots);
+    // Push restored state as the new HEAD so other devices pick it up
+    const pushResult = await pushRemote({
+      habits: parsed.board.habits,
+      sections: parsed.board.sections,
+      boardOrder: parsed.board.boardOrder,
+      templates: parsed.board.templates,
+      activeTemplateId: parsed.board.activeTemplateId,
+      spent: parsed.spent ?? spentRef.current,
+      lastSpend: parsed.lastSpend ?? lastSpendRef.current,
+      snapshots: parsed.snapshots ?? snapshotsRef.current,
+    });
+    if (!pushResult.ok) {
+      setSyncStatus('error');
+      showToast('error', `Restored locally but push failed: ${pushResult.error}`);
+      return;
+    }
+    setSyncStatus('synced');
+    showToast('success', 'Restored previous cloud version ✓');
+  }, [showToast, applyBoard]);
 
   const restoreHabit = useCallback((id: string) => {
     setHabits(prev => prev.map(h => h.id === id ? { ...h, archived: false } : h));
+    setBoardOrder(prev => prev.includes(id) ? prev : [...prev, id]);
   }, []);
 
   const deleteArchivedHabit = useCallback((id: string) => {
     if (!window.confirm('Permanently delete this habit and all its data?')) return;
     setHabits(prev => prev.filter(h => h.id !== id));
+    setBoardOrder(prev => prev.filter(x => x !== id));
   }, []);
 
-  // Drag-and-drop reordering (active in edit mode)
+  // Drag-and-drop reordering for habits and sections (edit mode)
   const handleDragStart = useCallback((id: string) => setDraggingId(id), []);
   const handleDragOver  = useCallback((id: string) => setDragOverId(id), []);
   const handleDragEnd   = useCallback(() => { setDraggingId(null); setDragOverId(null); }, []);
-  const reorderHabit = useCallback((srcId: string, targetId: string) => {
+  const reorderBoardItem = useCallback((srcId: string, targetId: string) => {
     setDraggingId(null); setDragOverId(null);
     if (srcId === targetId) return;
-    setHabits(prev => {
-      const from = prev.findIndex(h => h.id === srcId);
-      const to   = prev.findIndex(h => h.id === targetId);
+    setBoardOrder(prev => {
+      const from = prev.indexOf(srcId);
+      const to   = prev.indexOf(targetId);
       if (from < 0 || to < 0) return prev;
       const next = [...prev];
       const [moved] = next.splice(from, 1);
-      let insertAt = next.findIndex(h => h.id === targetId);
+      let insertAt = next.indexOf(targetId);
       if (from < to) insertAt += 1;   // dropping below → place after target
       next.splice(insertAt, 0, moved);
       return next;
@@ -1857,7 +2979,7 @@ export default function App() {
   }, []);
   const hideCommentTooltip = useCallback(() => setCommentTooltip(null), []);
 
-  // Per-habit pricing: per-level price when levels exist, else bonus/flat price
+  // Per-habit pricing: per-level price when levels exist, else flat price
   const totalMoney = useMemo(() => habits.reduce((sum, h) =>
     sum + h.completions.reduce((s, ds) => s + priceForDay(h, ds), 0),
   0), [habits]);
@@ -1868,31 +2990,94 @@ export default function App() {
   // Today's progress (always real "today", regardless of which day is in view).
   // Only habits actually due today count toward the ring / pips.
   const todayStr = fmt(todayNoon());
+
+  const isDue = useMemo(
+    () => makeIsDue(templates, todayStr, activeTemplateId, templateOverrideDate),
+    [templates, todayStr, activeTemplateId, templateOverrideDate],
+  );
+
+  const activeDisabled = useMemo(() => {
+    const tpl = templates.find(t => t.id === activeTemplateId);
+    return new Set(tpl?.disabledHabitIds ?? []);
+  }, [templates, activeTemplateId]);
+
+  const activeHiddenSections = useMemo(() => {
+    const tpl = templates.find(t => t.id === activeTemplateId);
+    return new Set(tpl?.hiddenSectionIds ?? []);
+  }, [templates, activeTemplateId]);
+
+  // Auto-apply weekday template each calendar day (manual dropdown overrides today).
+  useEffect(() => {
+    if (templateOverrideDate === todayStr) return;
+    if (templateOverrideDate && templateOverrideDate !== todayStr) {
+      setTemplateOverrideDate(null);
+    }
+    const dow = todayNoon().getDay();
+    const match = templates.find(t => t.weekdays.includes(dow));
+    if (!match) return;
+    if (match.id === activeTemplateId) return;
+    applyTemplateById(match.id, false);
+  }, [todayStr, templates, templateOverrideDate, activeTemplateId, applyTemplateById]);
+
   const todayPips = useMemo(
-    () => visibleHabits.filter(h => isScheduledOn(h, todayStr)).map(h => {
+    () => visibleHabits.filter(h => isDue(h, todayStr)).map(h => {
       const done = h.completions.includes(todayStr);
       return {
         id: h.id, name: h.name, color: h.color,
         done,
-        bonus: (h.bonuses ?? []).includes(todayStr),
         earned: done ? priceForDay(h, todayStr) : 0,
       };
     }),
-    [visibleHabits, todayStr],
+    [visibleHabits, todayStr, isDue],
   );
   const todayDone  = todayPips.filter(p => p.done).length;
   const todayMoney = todayPips.reduce((s, p) => s + p.earned, 0);
-  const dayStreak  = useMemo(() => calcDayStreak(visibleHabits), [visibleHabits]);
+  const dayStreak  = useMemo(() => calcDayStreak(visibleHabits, isDue), [visibleHabits, isDue]);
 
-  // Rows to render: in edit mode or with the eyeball on, show every habit;
-  // otherwise show only habits due today.
-  const shownHabits = useMemo(
-    () => (editMode || showAllHabits)
-      ? visibleHabits
-      : visibleHabits.filter(h => isScheduledOn(h, todayStr)),
-    [visibleHabits, editMode, showAllHabits, todayStr],
-  );
-  const hiddenCount = visibleHabits.length - shownHabits.length;
+  type BoardRow =
+    | { kind: 'section'; section: BoardSection }
+    | { kind: 'habit'; habit: Habit };
+
+  // Interleaved sections + habits in board order. Habits respect due-today filter
+  // (schedule + board disables). Edit / show-all reveals disabled habits so they
+  // can be toggled back on. Hidden sections are omitted outside edit mode.
+  const boardRows = useMemo((): BoardRow[] => {
+    const habitMap = new Map(habits.map(h => [h.id, h]));
+    const secMap = new Map(sections.map(s => [s.id, s]));
+    const showAll = editMode || showAllHabits;
+    const visibleIds = new Set(
+      habits
+        .filter(h => !h.archived && (showAll || isDue(h, todayStr)))
+        .map(h => h.id),
+    );
+    const rows: BoardRow[] = [];
+    for (let i = 0; i < boardOrder.length; i++) {
+      const id = boardOrder[i];
+      const sec = secMap.get(id);
+      if (sec) {
+        const hiddenOnBoard = activeHiddenSections.has(sec.id);
+        if (hiddenOnBoard && !editMode) continue;
+        const hasVisibleBelow = (() => {
+          for (let j = i + 1; j < boardOrder.length; j++) {
+            if (secMap.has(boardOrder[j])) break;
+            if (visibleIds.has(boardOrder[j])) return true;
+          }
+          return false;
+        })();
+        if (showAll || hasVisibleBelow || (editMode && hiddenOnBoard)) {
+          rows.push({ kind: 'section', section: sec });
+        }
+        continue;
+      }
+      if (visibleIds.has(id)) {
+        const h = habitMap.get(id);
+        if (h) rows.push({ kind: 'habit', habit: h });
+      }
+    }
+    return rows;
+  }, [habits, sections, boardOrder, editMode, showAllHabits, todayStr, isDue, activeHiddenSections]);
+  const shownHabitCount = boardRows.filter(r => r.kind === 'habit').length;
+  const hiddenCount = visibleHabits.length - shownHabitCount;
   // Stable per-day seed so "start"/"victory" quotes vary day to day.
   const daySeed = useMemo(() => {
     const d = todayNoon();
@@ -1903,35 +3088,46 @@ export default function App() {
 
   const { wName, wDay, wToday, wStat, daysBack, rowH, isMobile } = layout;
   const statCount = STAT_HEADERS[analyticsView].length;
+  // Fluid day columns fill leftover width; floors keep cells usable when narrow.
   const gridCols = isCurrentDay
-    ? `${wName}px repeat(${daysBack}, ${wDay}px) ${wToday}px repeat(${statCount}, ${wStat}px)`
-    : `${wName}px repeat(${daysBack + 1}, ${wDay}px) repeat(${statCount}, ${wStat}px)`;
+    ? `${wName}px repeat(${daysBack}, minmax(${wDay}px, 1fr)) minmax(${wToday}px, 1.4fr) repeat(${statCount}, ${wStat}px)`
+    : `${wName}px repeat(${daysBack + 1}, minmax(${wDay}px, 1fr)) repeat(${statCount}, ${wStat}px)`;
 
   const exportData = useCallback(() => {
-    const blob = new Blob([JSON.stringify(habits, null, 2)], { type: 'application/json' });
+    const blob = new Blob([JSON.stringify({
+      habits, sections, boardOrder, templates, activeTemplateId,
+    }, null, 2)], { type: 'application/json' });
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');
     a.href = url;
     a.download = `everyday-${fmt(todayNoon())}.json`;
     a.click();
     URL.revokeObjectURL(url);
-  }, [habits]);
+  }, [habits, sections, boardOrder, templates, activeTemplateId]);
 
   const importData = useCallback((file: File) => {
     const reader = new FileReader();
     reader.onload = e => {
       try {
         const parsed = JSON.parse(e.target?.result as string);
-        const clean  = sanitizeAll(parsed);
-        if (clean.length === 0) throw new Error('No valid habits found in this file.');
-        const ok = window.confirm(`Replace your current data with ${clean.length} habits from this file?`);
-        if (ok) setHabits(clean);
+        const board = Array.isArray(parsed)
+          ? boardFromLegacyHabits(parsed)
+          : sanitizeBoard(
+              (parsed as { habits?: unknown }).habits ?? parsed,
+              (parsed as { sections?: unknown }).sections,
+              (parsed as { boardOrder?: unknown }).boardOrder,
+              (parsed as { templates?: unknown }).templates,
+              (parsed as { activeTemplateId?: unknown }).activeTemplateId,
+            );
+        if (board.habits.length === 0) throw new Error('No valid habits found in this file.');
+        const ok = window.confirm(`Replace your current data with ${board.habits.length} habits from this file?`);
+        if (ok) applyBoard(board);
       } catch {
         alert('Could not read this file. Make sure it\'s a valid Everyday export.');
       }
     };
     reader.readAsText(file);
-  }, []);
+  }, [applyBoard]);
 
   const editingHabit = editingId ? visibleHabits.find(h => h.id === editingId) : null;
   const levelPickerHabit = levelPickerId ? visibleHabits.find(h => h.id === levelPickerId) : null;
@@ -1986,13 +3182,20 @@ export default function App() {
                 >
                   <SyncIcon spinning={syncStatus === 'syncing'} />
                 </button>
-                <MoneyMenu
-                  earned={totalMoney}
-                  spent={spent}
-                  lastSpend={lastSpend}
-                  onSpend={spend}
-                  onUndo={undoLastSpend}
-                />
+                <button
+                  className="data-btn"
+                  onClick={() => {
+                    if (!isSyncConfigured()) {
+                      showToast('error', 'Sync not configured — add VITE_GIST_ID and VITE_GITHUB_TOKEN in Vercel settings');
+                      return;
+                    }
+                    setShowSyncHistory(true);
+                  }}
+                  title="Restore a previous cloud sync"
+                >
+                  <HistoryIcon />
+                </button>
+                <MoneyMenu earned={totalMoney} spent={spent} lastSpend={lastSpend} onSpend={spend} />
                 {!isMobile && <span className="username">Kevin ▾</span>}
               </div>
             </div>
@@ -2017,6 +3220,12 @@ export default function App() {
             <div className="cell ch habits-header">
               <span className="habits-label">HABITS</span>
               <div className="habits-header-actions">
+                <TemplatePicker
+                  templates={templates}
+                  activeTemplateId={activeTemplateId}
+                  onSelect={id => applyTemplateById(id, true)}
+                  onManage={() => setShowTemplates(true)}
+                />
                 {editMode && archivedHabits.length > 0 && (
                   <button
                     className="archive-count-btn"
@@ -2070,49 +3279,50 @@ export default function App() {
               </div>
             ))}
 
-            {/* ─ Habit rows (active only) ─ */}
-            {shownHabits.map(habit => (
-              <Fragment key={habit.id}>
-                {editMode && (
-                  <div className="habit-insert-row">
-                    <button
-                      type="button"
-                      className={`habit-insert-btn${addPlacement === habit.id ? ' active' : ''}`}
-                      title="Add habit here"
-                      onClick={e => openAdd(habit.id, e.currentTarget)}
-                    >
-                      <span className="habit-insert-plus">+</span>
-                    </button>
-                  </div>
-                )}
-                {habit.sectionBefore && (
-                  <div className="section-divider">
-                    <span className="section-divider-label">{habit.sectionBefore}</span>
-                  </div>
-                )}
+            {/* ─ Board rows: sections + habits ─ */}
+            {boardRows.map(row => row.kind === 'section' ? (
+              <SectionRow
+                key={row.section.id}
+                section={row.section}
+                editMode={editMode}
+                isDragging={draggingId === row.section.id}
+                isDragOver={dragOverId === row.section.id && draggingId !== row.section.id}
+                sectionHidden={activeHiddenSections.has(row.section.id)}
+                canHideForBoard={!!activeTemplateId}
+                onRename={renameSection}
+                onDelete={deleteSection}
+                onToggleHidden={toggleSectionHidden}
+                onDragStartRow={handleDragStart}
+                onDragOverRow={handleDragOver}
+                onDropRow={reorderBoardItem}
+                onDragEndRow={handleDragEnd}
+              />
+            ) : (
               <HabitRow
-                key={habit.id}
-                habit={habit}
+                key={row.habit.id}
+                habit={row.habit}
                 dates={dates}
                 isCurrentDay={isCurrentDay}
+                isDue={isDue}
+                boardDisabled={activeDisabled.has(row.habit.id)}
+                canToggleBoardDisable={!!activeTemplateId}
                 onToggle={toggle}
-                onMiddleToggle={toggleBonus}
                 onRightClick={openComment}
                 onCommentHover={showCommentTooltip}
                 onCommentLeave={hideCommentTooltip}
+                onToggleBoardDisable={toggleBoardDisable}
                 editMode={editMode}
-                isEditing={editingId === habit.id}
-                onOpenEdit={() => openEdit(habit.id)}
+                isEditing={editingId === row.habit.id}
+                onOpenEdit={() => openEdit(row.habit.id)}
                 onOpenLevelPicker={openLevelPicker}
                 analyticsView={analyticsView}
-                isDragging={draggingId === habit.id}
-                isDragOver={dragOverId === habit.id && draggingId !== habit.id}
+                isDragging={draggingId === row.habit.id}
+                isDragOver={dragOverId === row.habit.id && draggingId !== row.habit.id}
                 onDragStartRow={handleDragStart}
                 onDragOverRow={handleDragOver}
-                onDropRow={reorderHabit}
+                onDropRow={reorderBoardItem}
                 onDragEndRow={handleDragEnd}
               />
-              </Fragment>
             ))}
 
             {editMode && (
@@ -2130,13 +3340,29 @@ export default function App() {
 
             {/* ─ Footer ─ */}
             <div className="cell footer-name">
-              <button
-                ref={addBtnRef}
-                className={`add-btn${addPlacement === 'footer' ? ' active' : ''}`}
-                onClick={() => openAdd('footer', addBtnRef.current)}
-              >
-                <span className="add-plus">+</span> New Habit
-              </button>
+              <div className="footer-add-row">
+                <button
+                  ref={addBtnRef}
+                  className={`add-btn${adding ? ' active' : ''}`}
+                  onClick={() => setAdding(a => !a)}
+                >
+                  <span className="add-plus">+</span> New Habit
+                </button>
+                {editMode && (
+                  <>
+                    <button className="add-section-btn" onClick={addSection} title="Add a section header">
+                      § Section
+                    </button>
+                    <button
+                      className="add-section-btn"
+                      onClick={() => setShowTemplates(true)}
+                      title="Manage board templates"
+                    >
+                      Templates…
+                    </button>
+                  </>
+                )}
+              </div>
             </div>
 
             {dates.map((d, i) => {
@@ -2172,10 +3398,15 @@ export default function App() {
       {editingHabit && (
         <EditPanel
           habit={editingHabit}
+          snapshotCount={snapshots.filter(s => s.habitId === editingHabit.id).length}
           onSave={saveEdit}
           onCancel={cancelEdit}
           onDelete={deleteHabit}
           onArchive={archiveHabit}
+          onHistory={() => {
+            setHistoryHabitId(editingHabit.id);
+            setEditingId(null);
+          }}
         />
       )}
 
@@ -2197,6 +3428,42 @@ export default function App() {
           onClose={() => setShowArchive(false)}
         />
       )}
+
+      {/* ── Board templates manager ── */}
+      {showTemplates && (
+        <TemplatesManagePanel
+          templates={templates}
+          activeTemplateId={activeTemplateId}
+          onClose={() => setShowTemplates(false)}
+          onRename={renameTemplate}
+          onSetWeekdays={setTemplateWeekdays}
+          onDelete={deleteTemplate}
+          onApply={id => { applyTemplateById(id, true); setShowTemplates(false); }}
+          onUpdate={updateTemplateFromBoard}
+          onSaveCurrent={saveCurrentAsTemplate}
+        />
+      )}
+
+      {/* ── Cloud sync history ── */}
+      {showSyncHistory && (
+        <SyncHistoryPanel
+          onRestore={restoreCloudRevision}
+          onClose={() => setShowSyncHistory(false)}
+        />
+      )}
+
+      {/* ── Habit definition history ── */}
+      {historyHabitId && (() => {
+        const h = habits.find(x => x.id === historyHabitId);
+        return (
+          <HabitHistoryPanel
+            habitName={h?.name ?? 'Habit'}
+            snapshots={snapshots.filter(s => s.habitId === historyHabitId)}
+            onRestore={restoreHabitSnapshot}
+            onClose={() => setHistoryHabitId(null)}
+          />
+        );
+      })()}
 
       {/* ── Comment Popover ── */}
       {commentTarget && (() => {
@@ -2312,6 +3579,15 @@ function SlidersIcon() {
     </svg>
   );
 }
+function LayoutIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="3" y="3" width="18" height="18" rx="2"/>
+      <path d="M3 9h18M9 21V9"/>
+    </svg>
+  );
+}
 function GripIcon() {
   return (
     <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
@@ -2370,6 +3646,20 @@ function SyncIcon({ spinning }: { spinning: boolean }) {
       <polyline points="1 4 1 10 7 10"/>
       <polyline points="23 20 23 14 17 14"/>
       <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+    </svg>
+  );
+}
+
+function HistoryIcon() {
+  return (
+    <svg
+      width="14" height="14" viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+      <path d="M3 3v5h5"/>
+      <path d="M12 7v5l3 3"/>
     </svg>
   );
 }

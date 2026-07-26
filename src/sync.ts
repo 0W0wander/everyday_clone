@@ -96,3 +96,51 @@ export async function pushRemote<T>(data: T): Promise<SyncResult<T>> {
     return { ok: false, error: `Network error: ${msg}` };
   }
 }
+
+// ── Gist revision history (for undoing a bad sync from another device) ────────
+
+export interface GistCommit {
+  version: string;       // SHA
+  committed_at: string;  // ISO date-time
+}
+
+/** Newest commits first. `limit` caps how many are returned. */
+export async function listGistCommits(limit = 4): Promise<SyncResult<GistCommit[]>> {
+  if (!isSyncConfigured()) return { ok: false, error: 'Sync not configured (missing env vars)' };
+  try {
+    const res = await fetch(
+      `${API_BASE}/gists/${GIST_ID!.trim()}/commits?per_page=${Math.max(1, Math.min(limit, 30))}`,
+      { headers: authHeaders() },
+    );
+    if (!res.ok) return { ok: false, error: await httpError(res) };
+    const raw = await res.json() as Array<{ version?: string; committed_at?: string }>;
+    const commits: GistCommit[] = (Array.isArray(raw) ? raw : [])
+      .filter(c => typeof c.version === 'string' && typeof c.committed_at === 'string')
+      .map(c => ({ version: c.version!, committed_at: c.committed_at! }));
+    return { ok: true, data: commits };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: `Network error: ${msg}` };
+  }
+}
+
+/** Fetch file contents from a specific gist revision SHA. */
+export async function fetchRevision<T>(sha: string): Promise<SyncResult<T>> {
+  if (!isSyncConfigured()) return { ok: false, error: 'Sync not configured (missing env vars)' };
+  try {
+    const res = await fetch(`${API_BASE}/gists/${GIST_ID!.trim()}/${sha}`, {
+      headers: authHeaders(),
+    });
+    if (!res.ok) return { ok: false, error: await httpError(res) };
+
+    const gist    = await res.json();
+    const content = gist?.files?.[FILENAME]?.content;
+    if (!content) return { ok: false, error: `Revision found but file "${FILENAME}" is missing or empty` };
+
+    const data = JSON.parse(content) as T;
+    return { ok: true, data };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: `Network error: ${msg}` };
+  }
+}

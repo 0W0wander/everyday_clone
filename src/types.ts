@@ -13,6 +13,27 @@ export interface HabitLevel {
   price: number;
 }
 
+/** Independent board header — sits in board order, not owned by a habit. */
+export interface BoardSection {
+  id: string;
+  label: string;
+}
+
+/** Named snapshot of board layout (habit + section order) with optional weekday defaults. */
+export interface BoardTemplate {
+  id: string;
+  name: string;
+  boardOrder: string[];      // habit + section ids
+  sections: BoardSection[];  // label snapshot for section ids in this template
+  weekdays: number[];        // 0=Sun … 6=Sat; empty = manual-only
+  /** habitId → activeLevel index to restore when this board is applied */
+  habitLevels?: Record<string, number>;
+  /** Habits inactive on this board (hidden; don't break streaks) */
+  disabledHabitIds?: string[];
+  /** Section headers omitted on this board (habits underneath stay) */
+  hiddenSectionIds?: string[];
+}
+
 export interface Habit {
   id: string;
   name: string;
@@ -20,15 +41,24 @@ export interface Habit {
   completions: string[]; // YYYY-MM-DD — fully completed days
   skips: string[];       // YYYY-MM-DD — skipped (count toward streak, shown as triangle)
   fails: string[];       // YYYY-MM-DD — failed (don't count toward streak, shown as ✕)
-  bonuses?: string[];    // YYYY-MM-DD — completions worth the bonus price (middle-click)
-  price?: number;        // $ earned per normal completion (default 0.10)
-  bonusPrice?: number;   // $ earned per middle-click "bonus" completion (default 1.00)
-  levels?: HabitLevel[]; // optional intensity tiers, smallest → largest
-  dayLevels?: Record<string, number>; // YYYY-MM-DD → index into levels[] for that day
+  price?: number;        // $ earned per normal / base-level completion (default 0.10)
+  levels?: HabitLevel[]; // extra intensity tiers above the base (name + price), smallest → largest
+  dayLevels?: Record<string, number>; // YYYY-MM-DD → index into effectiveLevels[] for that day
   activeLevel?: number;  // currently selected level index for new completions
-  sectionBefore?: string; // if set, a named section divider renders above this habit
   schedule?: HabitSchedule; // when this habit is due; absent = every day
   isBreak?: boolean;
   archived?: boolean;
   comments?: Record<string, string>; // YYYY-MM-DD → free-text note
+}
+
+/** Point-in-time copy of a habit's editable definition (not day completions). */
+export interface HabitSnapshot {
+  id: string;
+  habitId: string;
+  at: string; // ISO timestamp
+  name: string;
+  color: HabitColor;
+  price?: number;
+  levels?: HabitLevel[];
+  schedule?: HabitSchedule;
 }
