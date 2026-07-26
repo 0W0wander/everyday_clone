@@ -79,12 +79,21 @@ function getAccent(hex: string): string {
 
 const MONTHS      = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 const DAYS        = ['SUN','MON','TUE','WED','THU','FRI','SAT'];
-const STORAGE_KEY = 'everyday-habits-v2';
-const SPENT_KEY   = 'everyday-spent-v1';
+const STORAGE_KEY    = 'everyday-habits-v2';
+const SPENT_KEY      = 'everyday-spent-v1';
+const LAST_SPEND_KEY = 'everyday-last-spend-v1';
 
 function loadSpent(): number {
   try {
     const raw = localStorage.getItem(SPENT_KEY);
+    const n = raw ? parseFloat(raw) : 0;
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  } catch { return 0; }
+}
+
+function loadLastSpend(): number {
+  try {
+    const raw = localStorage.getItem(LAST_SPEND_KEY);
     const n = raw ? parseFloat(raw) : 0;
     return Number.isFinite(n) && n > 0 ? n : 0;
   } catch { return 0; }
@@ -163,10 +172,13 @@ function rateColor(rate: number, accent: string): string {
 }
 
 const STAT_HEADERS: string[][] = [
-  ['current\nstreak', 'longest\nstreak'],
-  ['this\nweek',      'this\nmonth',     'all\ntime'],
-  ['week\n%',         'month\n%',        'all-time\n%'],
+  ['level\nstreak', 'max\nlevel', 'streak'],
+  ['this\nweek',    'this\nmonth', 'all\ntime'],
+  ['week\n%',       'month\n%',    'all-time\n%'],
 ];
+
+/** On-schedule days at this level (at-least) needed before it becomes the habit's normal. */
+const NORMAL_STREAK_DAYS = 5;
 
 // ─── Date helpers ─────────────────────────────────────────────────────────────
 
@@ -209,49 +221,121 @@ function useViewportWidth(): number {
 }
 
 // ─── Streak helpers ───────────────────────────────────────────────────────────
+// Skips AND off-schedule days are transparent: they neither break nor extend a streak.
+// Only on-schedule completions count. (isScheduledOn is declared later; function decls hoist.)
 
-function streakAt(comp: Set<string>, skip: Set<string>, ds: string): number {
+function dayLevelOf(h: Habit, ds: string): number {
+  if (!habitHasLevels(h)) return 0;
+  return Math.min(h.dayLevels?.[ds] ?? 0, Math.max(0, effectiveLevels(h).length - 1));
+}
+
+function isStreakNeutral(h: Habit, skip: Set<string>, ds: string): boolean {
+  return skip.has(ds) || !isScheduledOn(h, ds);
+}
+
+/** Walk backward from ds counting on-schedule completions (optionally at-least level). */
+function streakAt(h: Habit, ds: string, minLevel?: number): number {
+  const comp = new Set(h.completions);
+  const skip = new Set(h.skips);
   if (!comp.has(ds) && !skip.has(ds)) return 0;
-  let n = comp.has(ds) ? 1 : 0;
+
+  // Off-schedule completion: local shade only — does not join the on-schedule chain
+  if (comp.has(ds) && !isScheduledOn(h, ds)) {
+    if (minLevel !== undefined && dayLevelOf(h, ds) < minLevel) return 0;
+    return 1;
+  }
+
+  let n = 0;
   const d = new Date(ds + 'T12:00:00');
-  for (;;) {
-    d.setDate(d.getDate() - 1);
+  for (let guard = 0; guard < 4000; guard++) {
     const s = fmt(d);
-    if (comp.has(s)) { n++; }
-    else if (skip.has(s)) { /* skip is transparent — no increment, no limit */ }
-    else break;
+    if (isStreakNeutral(h, skip, s)) {
+      d.setDate(d.getDate() - 1);
+      continue;
+    }
+    if (comp.has(s) && (minLevel === undefined || dayLevelOf(h, s) >= minLevel)) {
+      n++;
+      d.setDate(d.getDate() - 1);
+      continue;
+    }
+    break;
   }
   return n;
 }
 
-function calcCurrentStreak(completions: string[], skips: string[]): number {
-  const comp = new Set(completions), skip = new Set(skips);
-  const t = todayNoon(), ts = fmt(t);
-  const y = new Date(t); y.setDate(y.getDate() - 1); const ys = fmt(y);
-  if (comp.has(ts) || skip.has(ts)) return streakAt(comp, skip, ts);
-  if (comp.has(ys) || skip.has(ys)) return streakAt(comp, skip, ys);
+function calcCurrentStreak(h: Habit, minLevel?: number): number {
+  const comp = new Set(h.completions);
+  const skip = new Set(h.skips);
+  const d = todayNoon();
+  let ds = fmt(d);
+  // Grace: today is a scheduled miss → start from yesterday
+  if (isScheduledOn(h, ds) && !comp.has(ds) && !skip.has(ds)) {
+    d.setDate(d.getDate() - 1);
+    ds = fmt(d);
+  }
+  // Need a completion (meeting minLevel) at the tip, walking through neutrals
+  for (let guard = 0; guard < 4000; guard++) {
+    ds = fmt(d);
+    if (isStreakNeutral(h, skip, ds)) {
+      d.setDate(d.getDate() - 1);
+      continue;
+    }
+    if (comp.has(ds) && (minLevel === undefined || dayLevelOf(h, ds) >= minLevel)) {
+      return streakAt(h, ds, minLevel);
+    }
+    return 0;
+  }
   return 0;
 }
 
-function calcLongestStreak(completions: string[], skips: string[]): number {
-  const skipSet = new Set(skips);
-  const all = [...new Set([...completions, ...skips])].sort();
-  if (!all.length) return 0;
-  let max = 0, cur = skipSet.has(all[0]) ? 0 : 1;
-  for (let i = 1; i < all.length; i++) {
-    const diff = Math.round(
-      (new Date(all[i] + 'T12:00:00').getTime() -
-       new Date(all[i-1] + 'T12:00:00').getTime()) / 86400000
-    );
-    if (diff !== 1) {
-      max = Math.max(max, cur);
-      cur = skipSet.has(all[i]) ? 0 : 1;
-    } else if (!skipSet.has(all[i])) {
+function calcLongestStreak(h: Habit, minLevel?: number): number {
+  const comp = new Set(h.completions);
+  const skip = new Set(h.skips);
+  const dates = [...comp].filter(ds => {
+    if (!isScheduledOn(h, ds)) return false;
+    if (minLevel !== undefined && dayLevelOf(h, ds) < minLevel) return false;
+    return true;
+  }).sort();
+  if (!dates.length) return 0;
+
+  // Walk calendar from first completion, neutrals don't break, scheduled misses do
+  const start = new Date(dates[0] + 'T12:00:00');
+  const end = todayNoon();
+  let max = 0, cur = 0;
+  for (const d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+    const ds = fmt(d);
+    if (isStreakNeutral(h, skip, ds)) continue;
+    if (comp.has(ds) && (minLevel === undefined || dayLevelOf(h, ds) >= minLevel)) {
       cur++;
+      max = Math.max(max, cur);
+    } else {
+      cur = 0;
     }
-    // skips are transparent — no increment, no break
   }
-  return Math.max(max, cur);
+  return max;
+}
+
+function calcCurrentLevelStreak(h: Habit, levelIdx: number): number {
+  return calcCurrentStreak(h, levelIdx);
+}
+
+function calcLongestLevelStreak(h: Habit, levelIdx: number): number {
+  return calcLongestStreak(h, levelIdx);
+}
+
+function normalLevelOf(h: Habit): number {
+  if (!habitHasLevels(h)) return 0;
+  return Math.min(h.activeLevel ?? 0, Math.max(0, effectiveLevels(h).length - 1));
+}
+
+/** After logging `loggedLevel`, promote activeLevel if on-schedule streak ≥ threshold. */
+function withAutoPromote(h: Habit, loggedLevel: number): Habit {
+  if (!habitHasLevels(h)) return h;
+  const cur = Math.min(loggedLevel, effectiveLevels(h).length - 1);
+  const active = normalLevelOf(h);
+  if (cur <= active) return h;
+  if (calcCurrentLevelStreak(h, cur) < NORMAL_STREAK_DAYS) return h;
+  return { ...h, activeLevel: cur };
 }
 
 // Consecutive days (ending today, or yesterday if today isn't finished yet) on
@@ -297,8 +381,10 @@ function intensityIdx(s: number): number {
   if (s <= 7) return 3; if (s <= 11) return 4; if (s <= 16) return 5;
   if (s <= 22) return 6; return 7;
 }
-function cellBg(streak: number, color: string): string {
-  return streak === 0 ? '' : getPalette(color)[intensityIdx(streak)];
+function cellBg(streak: number, color: string, shadePenalty = 0): string {
+  if (streak === 0) return '';
+  const idx = Math.max(0, intensityIdx(streak) - shadePenalty);
+  return getPalette(color)[idx];
 }
 
 // ─── Data sanitisation ────────────────────────────────────────────────────────
@@ -769,8 +855,21 @@ function EditPanel({ habit, onSave, onCancel, onDelete, onArchive }: EditPanelPr
       <div className="levels-editor">
         <div className="levels-editor-head">
           <span className="levels-editor-title">Levels</span>
-          <span className="levels-editor-hint">the habit name + “per completion” price is your base level; add bigger versions below</span>
+          <span className="levels-editor-hint">
+            base + extras below; after {NORMAL_STREAK_DAYS} on-schedule days a level becomes Normal
+          </span>
         </div>
+        {habitHasLevels(habit) && (
+          <div className="level-row level-row-base">
+            <span className="level-base-label" title="Base level (habit name + per-completion price)">
+              Base · {name.trim() || habit.name}
+            </span>
+            <span className="level-base-price">${(parseFloat(price) || DEFAULT_PRICE).toFixed(2)}</span>
+            {normalLevelOf(habit) === 0 && (
+              <span className="level-normal-badge" title="Current normal level">Normal</span>
+            )}
+          </div>
+        )}
         {levels.map((lvl, i) => (
           <div className="level-row" key={i}>
             <div className="level-move">
@@ -794,6 +893,9 @@ function EditPanel({ habit, onSave, onCancel, onDelete, onArchive }: EditPanelPr
                 onKeyDown={e => { if (e.key === 'Enter') handleSave(); if (e.key === 'Escape') onCancel(); }}
               />
             </span>
+            {habitHasLevels(habit) && normalLevelOf(habit) === i + 1 && (
+              <span className="level-normal-badge" title="Current normal level">Normal</span>
+            )}
             <button className="level-remove" onClick={() => removeLevel(i)} title="Remove level">✕</button>
           </div>
         ))}
@@ -1018,18 +1120,22 @@ const HabitRow = memo(function HabitRow(
   const skip  = useMemo(() => new Set(habit.skips),       [habit.skips]);
   const fail  = useMemo(() => new Set(habit.fails),       [habit.fails]);
   const bonus = useMemo(() => new Set(habit.bonuses ?? []), [habit.bonuses]);
-  const cur  = useMemo(() => calcCurrentStreak(habit.completions, habit.skips),  [habit.completions, habit.skips]);
-  const lon  = useMemo(() => calcLongestStreak(habit.completions, habit.skips),  [habit.completions, habit.skips]);
-  const acc  = getAccent(habit.color);
-  const doneToday = comp.has(fmt(todayNoon()));   // completed for today?
-  const urgeMax   = lon > 0 && cur >= lon && !doneToday; // at record run but today not done yet
-
   const hasLevels   = habitHasLevels(habit);
   const levels      = useMemo(() => effectiveLevels(habit), [habit]); // base + extras
   const dayLevels   = habit.dayLevels ?? {};
+  const activeLevelIdx = normalLevelOf(habit);
+  const cur  = useMemo(() => calcCurrentStreak(habit), [habit]);
+  const lvlCur = useMemo(() => calcCurrentLevelStreak(habit, activeLevelIdx), [habit, activeLevelIdx]);
+  const lvlMax = useMemo(() => calcLongestLevelStreak(habit, activeLevelIdx), [habit, activeLevelIdx]);
+  const acc  = getAccent(habit.color);
+  const todayStr = fmt(todayNoon());
+  const doneToday = comp.has(todayStr);
+  const doneTodayAtNormal = doneToday && dayLevelOf(habit, todayStr) >= activeLevelIdx;
+  const todayScheduled = isScheduledOn(habit, todayStr);
+  const urgeMax = lvlMax > 0 && lvlCur >= lvlMax && todayScheduled && !doneTodayAtNormal;
+
   // Sidebar name is clickable (to pick level) only in non-edit mode with levels defined
   const nameClickable = hasLevels && !editMode;
-  const activeLevelIdx = Math.min(habit.activeLevel ?? 0, Math.max(0, levels.length - 1));
   const displayName = hasLevels ? levels[activeLevelIdx].name : habit.name;
 
   const wkCnt  = useMemo(() => countFrom(habit.completions, startOfWeek()),  [habit.completions]);
@@ -1089,8 +1195,12 @@ const HabitRow = memo(function HabitRow(
         const skpd  = skip.has(ds);
         const faild = fail.has(ds);
         const bns   = done && bonus.has(ds);
-        const str   = (done || skpd) ? streakAt(comp, skip, ds) : 0;
-        const bg    = cellBg(str, habit.color);
+        const str   = (done || skpd) ? streakAt(habit, ds) : 0;
+        const dayLvl = (done && hasLevels) ? Math.min(dayLevels[ds] ?? 0, levels.length - 1) : 0;
+        const shadePenalty = (done && hasLevels && dayLvl < activeLevelIdx)
+          ? (activeLevelIdx - dayLvl)
+          : 0;
+        const bg    = cellBg(str, habit.color, shadePenalty);
         const isTd  = isCurrentDay && i === dates.length - 1;
 
         const prevDs = i > 0 ? fmt(dates[i - 1]) : null;
@@ -1103,11 +1213,9 @@ const HabitRow = memo(function HabitRow(
         const comment = habit.comments?.[ds];
         const hasComment = !!comment;
 
-        // Level indicator: subtle bar only for completions ABOVE the base level,
-        // so base-level days look like normal completions (no mark).
-        const dayLvl = (done && hasLevels) ? Math.min(dayLevels[ds] ?? 0, levels.length - 1) : 0;
-        const showLevelBar = done && hasLevels && dayLvl >= 1;
-        const levelFrac = showLevelBar ? (dayLvl + 1) / levels.length : 0;
+        // Level pips: one per effective level; fill through dayLvl (base = 1 pip).
+        const showLevelPips = done && hasLevels;
+        const isMaxLevel = showLevelPips && dayLvl >= levels.length - 1;
 
         // Off-day: this habit isn't scheduled on this date and nothing's logged.
         const offDay = !done && !skpd && !faild && !isScheduledOn(habit, ds);
@@ -1137,22 +1245,29 @@ const HabitRow = memo(function HabitRow(
             {showRight && <div className="cell-skip cell-skip-right" style={{ background: bg }} />}
             {faild && <div className="cell-fail" />}
             {bns && <span className="cell-money">$</span>}
-            {showLevelBar && (
+            {showLevelPips && (
               <div
-                className="cell-level-bar"
-                style={{
-                  width: `${levelFrac * 78}%`,
-                  background: getPalette(habit.color)[Math.min(intensityIdx(str) + 3, 7)],
-                }}
+                className={`cell-level-pips${isMaxLevel ? ' is-max' : ''}`}
                 title={`${levels[dayLvl].name} · $${levels[dayLvl].price.toFixed(2)}`}
-              />
+              >
+                {levels.map((_, li) => (
+                  <span
+                    key={li}
+                    className={`cell-level-pip${li <= dayLvl ? ' filled' : ''}`}
+                    style={li <= dayLvl ? {
+                      background: getPalette(habit.color)[Math.min(intensityIdx(str) + 3, 7)],
+                    } : undefined}
+                  />
+                ))}
+              </div>
             )}
             {hasComment && (() => {
               const pal = getPalette(habit.color);
+              const shadeIdx = Math.max(0, intensityIdx(str) - shadePenalty);
               // On colored cells: dot is 1-2 shades deeper than cell bg.
               // On empty/failed: dot is a light-mid tint of the habit color.
-              const dotBg   = (done || skpd) ? pal[Math.min(intensityIdx(str) + 2, 7)] : pal[2];
-              const dotRing = (done || skpd) ? pal[Math.min(intensityIdx(str) + 1, 7)] : pal[4];
+              const dotBg   = (done || skpd) ? pal[Math.min(shadeIdx + 2, 7)] : pal[2];
+              const dotRing = (done || skpd) ? pal[Math.min(shadeIdx + 1, 7)] : pal[4];
               return (
                 <div
                   className="comment-dot"
@@ -1165,18 +1280,21 @@ const HabitRow = memo(function HabitRow(
       })}
 
       {analyticsView === 0 && <>
-        <div className="cell stat-cell">
-          {doneToday ? <span className="streak-badge" style={{ background: acc }}>{cur}</span>
-                     : <span className="stat-num">{cur || ''}</span>}
+        <div className="cell stat-cell" title="Current streak at your normal level">
+          <span className="stat-num">{lvlCur || ''}</span>
         </div>
-        <div className="cell stat-cell">
+        <div className="cell stat-cell" title="Best streak at your normal level">
           <span
             className={`stat-num${urgeMax ? ' streak-urge' : ''}`}
             style={urgeMax ? { color: acc, textDecorationColor: acc } : undefined}
-            title={urgeMax ? 'You\u2019re at your record streak \u2014 complete it today to extend it!' : undefined}
+            title={urgeMax ? 'You\u2019re at your record level streak \u2014 hit normal (or higher) today to extend it!' : undefined}
           >
-            {lon || ''}
+            {lvlMax || ''}
           </span>
+        </div>
+        <div className="cell stat-cell" title="General current streak (any level)">
+          {doneToday ? <span className="streak-badge" style={{ background: acc }}>{cur}</span>
+                     : <span className="stat-num">{cur || ''}</span>}
         </div>
       </>}
 
@@ -1290,7 +1408,13 @@ const DailyProgress = memo(function DailyProgress(
 // ─── MoneyMenu — top-right balance with a hover "spend" popover ──────────────
 
 const MoneyMenu = memo(function MoneyMenu(
-  { earned, spent, onSpend }: { earned: number; spent: number; onSpend: (amt: number) => void; }
+  { earned, spent, lastSpend, onSpend, onUndo }: {
+    earned: number;
+    spent: number;
+    lastSpend: number;
+    onSpend: (amt: number) => void;
+    onUndo: () => void;
+  }
 ) {
   const [open, setOpen] = useState(false);
   const [amt, setAmt]   = useState('');
@@ -1319,7 +1443,12 @@ const MoneyMenu = memo(function MoneyMenu(
         <div className="money-menu" onMouseEnter={openNow} onMouseLeave={closeSoon}>
           <div className="money-menu-rows">
             <div className="money-menu-row"><span>Earned</span><span className="mm-pos">+${earned.toFixed(2)}</span></div>
-            <div className="money-menu-row"><span>Spent</span><span className="mm-neg">-${spent.toFixed(2)}</span></div>
+            <div className="money-menu-row">
+              <span>Last spent</span>
+              <span className="mm-neg">
+                {lastSpend > 0 ? `−$${lastSpend.toFixed(2)}` : '—'}
+              </span>
+            </div>
             <div className="money-menu-row money-menu-total"><span>Balance</span><span>${balance.toFixed(2)}</span></div>
           </div>
           <div className="money-spend">
@@ -1336,8 +1465,15 @@ const MoneyMenu = memo(function MoneyMenu(
             />
             <button className="btn-spend" onClick={submit}>Spend</button>
           </div>
+          {lastSpend > 0 && (
+            <button className="btn-undo" onClick={onUndo} type="button">
+              Undo last spend
+            </button>
+          )}
           {spent > 0 && (
-            <button className="money-reset" onClick={() => onSpend(-spent)}>Reset spending</button>
+            <button className="money-reset" onClick={() => onSpend(-spent)} type="button">
+              Reset spending
+            </button>
           )}
         </div>
       )}
@@ -1350,8 +1486,10 @@ const MoneyMenu = memo(function MoneyMenu(
 export default function App() {
   const [habits,         setHabits]         = useState<Habit[]>(loadHabits);
   const [offset,         setOffset]         = useState(0);
-  const [adding,         setAdding]         = useState(false);
+  /** null = closed; 'footer' / 'end' append among active; otherwise insert before that habit id. */
+  const [addPlacement, setAddPlacement] = useState<null | 'footer' | 'end' | string>(null);
   const [spent,          setSpent]          = useState<number>(loadSpent);
+  const [lastSpend,      setLastSpend]      = useState<number>(loadLastSpend);
   const [editMode,       setEditMode]       = useState(false);
   const [showAllHabits,  setShowAllHabits]  = useState(false);
   const [editingId,      setEditingId]      = useState<string | null>(null);
@@ -1371,8 +1509,9 @@ export default function App() {
   const [showArchive,    setShowArchive]    = useState(false);
   const [commentTarget,  setCommentTarget]  = useState<{ id: string; ds: string; rect: DOMRect } | null>(null);
   const [commentTooltip, setCommentTooltip] = useState<{ text: string; ds: string; rect: DOMRect } | null>(null);
-  const addBtnRef    = useRef<HTMLButtonElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const addBtnRef     = useRef<HTMLButtonElement>(null);
+  const addAnchorRef  = useRef<HTMLButtonElement | null>(null);
+  const fileInputRef  = useRef<HTMLInputElement>(null);
   const syncTimer    = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isFirstLoad  = useRef(true);
   const habitsRef    = useRef<Habit[]>(habits);
@@ -1389,10 +1528,24 @@ export default function App() {
   const archivedHabits = useMemo(() => habits.filter(h =>  h.archived), [habits]);
 
   useEffect(() => { localStorage.setItem(SPENT_KEY, String(spent)); spentRef.current = spent; }, [spent]);
+  useEffect(() => {
+    if (lastSpend > 0) localStorage.setItem(LAST_SPEND_KEY, String(lastSpend));
+    else localStorage.removeItem(LAST_SPEND_KEY);
+  }, [lastSpend]);
 
   const spend = useCallback((amt: number) => {
-    setSpent(s => Math.max(0, Math.round((s + amt) * 100) / 100));
+    const rounded = Math.round(amt * 100) / 100;
+    setSpent(s => Math.max(0, Math.round((s + rounded) * 100) / 100));
+    if (rounded > 0) setLastSpend(rounded);
+    else if (rounded < 0) setLastSpend(0); // reset / undo-via-negative clears last spend
   }, []);
+
+  const undoLastSpend = useCallback(() => {
+    if (lastSpend <= 0) return;
+    const amt = lastSpend;
+    setSpent(s => Math.max(0, Math.round((s - amt) * 100) / 100));
+    setLastSpend(0);
+  }, [lastSpend]);
 
   // Persist locally + debounce cloud push (silent background — errors shown via dot only)
   useEffect(() => {
@@ -1471,10 +1624,14 @@ export default function App() {
       const hasLevels = habitHasLevels(h);
       if (!done && !skpd && !fail) {
         // empty → done: record at the habit's active level (index into effective levels)
+        const logged = hasLevels
+          ? Math.min(h.activeLevel ?? 0, effectiveLevels(h).length - 1)
+          : 0;
         const dayLevels = hasLevels
-          ? { ...(h.dayLevels ?? {}), [ds]: Math.min(h.activeLevel ?? 0, effectiveLevels(h).length - 1) }
+          ? { ...(h.dayLevels ?? {}), [ds]: logged }
           : h.dayLevels;
-        return { ...h, completions: [...h.completions, ds], dayLevels };
+        const next = { ...h, completions: [...h.completions, ds], dayLevels };
+        return hasLevels ? withAutoPromote(next, logged) : next;
       }
       if (done)
         return { ...h, completions: h.completions.filter(c => c !== ds), skips: [...h.skips, ds], bonuses: dropBonus, dayLevels: dropDayLevel(h.dayLevels, ds) };
@@ -1496,13 +1653,14 @@ export default function App() {
         if (alreadyTop)
           // already at top level → clear back to empty
           return { ...h, completions: h.completions.filter(c => c !== ds), dayLevels: dropDayLevel(h.dayLevels, ds) };
-        return {
+        const next = {
           ...h,
           completions: h.completions.includes(ds) ? h.completions : [...h.completions, ds],
           skips: h.skips.filter(s => s !== ds),
           fails: h.fails.filter(f => f !== ds),
           dayLevels: { ...(h.dayLevels ?? {}), [ds]: topIdx },
         };
+        return withAutoPromote(next, topIdx);
       }
 
       // Legacy behavior: middle-click toggles a $1 bonus completion
@@ -1519,15 +1677,51 @@ export default function App() {
     }));
   }, []);
 
+  const closeAdd = useCallback(() => {
+    setAddPlacement(null);
+    addAnchorRef.current = null;
+  }, []);
+
+  const openAdd = useCallback((
+    placement: 'footer' | 'end' | string,
+    anchor: HTMLButtonElement | null,
+  ) => {
+    if (addPlacement === placement) { closeAdd(); return; }
+    addAnchorRef.current = anchor;
+    setEditingId(null);
+    setAddPlacement(placement);
+  }, [addPlacement, closeAdd]);
+
   const addHabit = useCallback((name: string, color: string) => {
     const n = name.trim();
     if (!n) return;
-    setHabits(prev => [...prev, {
+    const newHabit: Habit = {
       id: `h-${Date.now()}`, name: n, color,
       completions: [], skips: [], fails: [], bonuses: [],
-    }]);
-    setAdding(false);
-  }, []);
+    };
+    const beforeId = (addPlacement && addPlacement !== 'footer' && addPlacement !== 'end')
+      ? addPlacement
+      : null;
+    setHabits(prev => {
+      if (beforeId) {
+        const idx = prev.findIndex(h => h.id === beforeId);
+        if (idx >= 0) {
+          const next = [...prev];
+          next.splice(idx, 0, newHabit);
+          return next;
+        }
+      }
+      // Append among active habits (before first archived entry)
+      const archIdx = prev.findIndex(h => h.archived);
+      if (archIdx >= 0) {
+        const next = [...prev];
+        next.splice(archIdx, 0, newHabit);
+        return next;
+      }
+      return [...prev, newHabit];
+    });
+    closeAdd();
+  }, [addPlacement, closeAdd]);
 
   const saveEdit = useCallback((name: string, color: HabitColor, price: number, bonusPrice: number, sectionBefore: string, levels: HabitLevel[], schedule: HabitSchedule | undefined) => {
     setHabits(prev => prev.map(h => {
@@ -1792,7 +1986,13 @@ export default function App() {
                 >
                   <SyncIcon spinning={syncStatus === 'syncing'} />
                 </button>
-                <MoneyMenu earned={totalMoney} spent={spent} onSpend={spend} />
+                <MoneyMenu
+                  earned={totalMoney}
+                  spent={spent}
+                  lastSpend={lastSpend}
+                  onSpend={spend}
+                  onUndo={undoLastSpend}
+                />
                 {!isMobile && <span className="username">Kevin ▾</span>}
               </div>
             </div>
@@ -1842,7 +2042,7 @@ export default function App() {
                 </button>
                 <button
                   className={`edit-mode-btn${editMode ? ' active' : ''}`}
-                  onClick={() => { setEditMode(m => !m); cancelEdit(); }}
+                  onClick={() => { setEditMode(m => !m); cancelEdit(); closeAdd(); }}
                   title={editMode ? 'Done editing' : 'Edit habits'}
                 >
                   <SlidersIcon />
@@ -1873,6 +2073,18 @@ export default function App() {
             {/* ─ Habit rows (active only) ─ */}
             {shownHabits.map(habit => (
               <Fragment key={habit.id}>
+                {editMode && (
+                  <div className="habit-insert-row">
+                    <button
+                      type="button"
+                      className={`habit-insert-btn${addPlacement === habit.id ? ' active' : ''}`}
+                      title="Add habit here"
+                      onClick={e => openAdd(habit.id, e.currentTarget)}
+                    >
+                      <span className="habit-insert-plus">+</span>
+                    </button>
+                  </div>
+                )}
                 {habit.sectionBefore && (
                   <div className="section-divider">
                     <span className="section-divider-label">{habit.sectionBefore}</span>
@@ -1903,12 +2115,25 @@ export default function App() {
               </Fragment>
             ))}
 
+            {editMode && (
+              <div className="habit-insert-row">
+                <button
+                  type="button"
+                  className={`habit-insert-btn${addPlacement === 'end' ? ' active' : ''}`}
+                  title="Add habit here"
+                  onClick={e => openAdd('end', e.currentTarget)}
+                >
+                  <span className="habit-insert-plus">+</span>
+                </button>
+              </div>
+            )}
+
             {/* ─ Footer ─ */}
             <div className="cell footer-name">
               <button
                 ref={addBtnRef}
-                className={`add-btn${adding ? ' active' : ''}`}
-                onClick={() => setAdding(a => !a)}
+                className={`add-btn${addPlacement === 'footer' ? ' active' : ''}`}
+                onClick={() => openAdd('footer', addBtnRef.current)}
               >
                 <span className="add-plus">+</span> New Habit
               </button>
@@ -1939,8 +2164,8 @@ export default function App() {
       </div>
 
       {/* ── Add Habit Panel (portal, never clipped by overflow) ── */}
-      {adding && (
-        <AddPanel anchorRef={addBtnRef} onAdd={addHabit} onClose={() => setAdding(false)} />
+      {addPlacement !== null && (
+        <AddPanel anchorRef={addAnchorRef} onAdd={addHabit} onClose={closeAdd} />
       )}
 
       {/* ── Edit Panel (portal, never clipped by overflow) ── */}
