@@ -1,5 +1,5 @@
 import {
-  useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, memo,
+  Fragment, useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, memo,
 } from 'react';
 import { createPortal } from 'react-dom';
 import './App.css';
@@ -386,35 +386,59 @@ function streakEarliest(h: Habit): string | null {
   return earliest;
 }
 
-/** Streak of completions ending on `ds` (must be a completed or skipped day). */
-function streakAt(h: Habit, ds: string, isDue: DueFn = isScheduledOn): number {
+function dayLevelOf(h: Habit, ds: string): number {
+  if (!habitHasLevels(h)) return 0;
+  return Math.min(h.dayLevels?.[ds] ?? 0, Math.max(0, effectiveLevels(h).length - 1));
+}
+
+function normalLevelOf(h: Habit): number {
+  if (!habitHasLevels(h)) return 0;
+  return Math.min(h.activeLevel ?? 0, Math.max(0, effectiveLevels(h).length - 1));
+}
+
+function completionCountsForStreak(h: Habit, ds: string, minLevel?: number): boolean {
+  if (minLevel === undefined) return true;
+  return dayLevelOf(h, ds) >= minLevel;
+}
+
+/**
+ * Streak of completions ending on `ds` (must be a completed or skipped day).
+ * Off-schedule / board-disabled days are transparent (don't break, don't count),
+ * even if something was logged. Optional minLevel = at-least level streak.
+ */
+function streakAt(h: Habit, ds: string, isDue: DueFn = isScheduledOn, minLevel?: number): number {
   const comp = new Set(h.completions);
   const skip = new Set(h.skips);
   const fail = new Set(h.fails);
   if (!comp.has(ds) && !skip.has(ds)) return 0;
+
+  // Off-schedule tip: local shade only (doesn't join the due-day chain)
+  if (comp.has(ds) && !isDue(h, ds)) {
+    return completionCountsForStreak(h, ds, minLevel) ? 1 : 0;
+  }
 
   const earliest = streakEarliest(h) ?? ds;
   let n = 0;
   const d = new Date(ds + 'T12:00:00');
   while (fmt(d) >= earliest) {
     const s = fmt(d);
-    if (comp.has(s)) {
+    if (!isDue(h, s)) {
+      // off-day / board-disabled — transparent
+    } else if (comp.has(s) && completionCountsForStreak(h, s, minLevel)) {
       n++;
     } else if (skip.has(s)) {
       // transparent
     } else if (fail.has(s)) {
       break;
-    } else if (!isDue(h, s)) {
-      // off-day / board-disabled — transparent
     } else {
-      break; // due but empty
+      break; // due but empty, or completed below minLevel
     }
     d.setDate(d.getDate() - 1);
   }
   return n;
 }
 
-function calcCurrentStreak(h: Habit, isDue: DueFn = isScheduledOn): number {
+function calcCurrentStreak(h: Habit, isDue: DueFn = isScheduledOn, minLevel?: number): number {
   const comp = new Set(h.completions);
   const skip = new Set(h.skips);
   const fail = new Set(h.fails);
@@ -427,25 +451,25 @@ function calcCurrentStreak(h: Habit, isDue: DueFn = isScheduledOn): number {
 
   while (fmt(d) >= earliest) {
     const s = fmt(d);
-    if (comp.has(s)) {
+    if (!isDue(h, s)) {
+      // off-day / board-disabled — transparent
+    } else if (comp.has(s) && completionCountsForStreak(h, s, minLevel)) {
       n++;
     } else if (skip.has(s)) {
       // transparent
     } else if (fail.has(s)) {
       break;
-    } else if (!isDue(h, s)) {
-      // off-day / board-disabled — transparent
     } else if (s === today) {
       // grace: today is still in progress
     } else {
-      break; // missed a due day
+      break; // missed a due day (or below minLevel)
     }
     d.setDate(d.getDate() - 1);
   }
   return n;
 }
 
-function calcLongestStreak(h: Habit, isDue: DueFn = isScheduledOn): number {
+function calcLongestStreak(h: Habit, isDue: DueFn = isScheduledOn, minLevel?: number): number {
   const comp = new Set(h.completions);
   const skip = new Set(h.skips);
   const fail = new Set(h.fails);
@@ -459,15 +483,15 @@ function calcLongestStreak(h: Habit, isDue: DueFn = isScheduledOn): number {
 
   while (fmt(d) <= today) {
     const s = fmt(d);
-    if (comp.has(s)) {
+    if (!isDue(h, s)) {
+      // off-day / board-disabled — transparent
+    } else if (comp.has(s) && completionCountsForStreak(h, s, minLevel)) {
       cur++;
       if (cur > max) max = cur;
     } else if (skip.has(s)) {
       // transparent
     } else if (fail.has(s)) {
       cur = 0;
-    } else if (!isDue(h, s)) {
-      // off-day / board-disabled — transparent
     } else if (s === today) {
       // today still open — don't wipe the run
     } else {
@@ -476,6 +500,24 @@ function calcLongestStreak(h: Habit, isDue: DueFn = isScheduledOn): number {
     d.setDate(d.getDate() + 1);
   }
   return max;
+}
+
+function calcCurrentLevelStreak(h: Habit, levelIdx: number, isDue: DueFn = isScheduledOn): number {
+  return calcCurrentStreak(h, isDue, levelIdx);
+}
+
+function calcLongestLevelStreak(h: Habit, levelIdx: number, isDue: DueFn = isScheduledOn): number {
+  return calcLongestStreak(h, isDue, levelIdx);
+}
+
+/** After logging `loggedLevel`, promote activeLevel if due-day streak ≥ threshold. */
+function withAutoPromote(h: Habit, loggedLevel: number, isDue: DueFn = isScheduledOn): Habit {
+  if (!habitHasLevels(h)) return h;
+  const cur = Math.min(loggedLevel, effectiveLevels(h).length - 1);
+  const active = normalLevelOf(h);
+  if (cur <= active) return h;
+  if (calcCurrentLevelStreak(h, cur, isDue) < NORMAL_STREAK_DAYS) return h;
+  return { ...h, activeLevel: cur };
 }
 
 // Consecutive days (ending today, or yesterday if today isn't finished yet) on
@@ -1652,19 +1694,10 @@ function EditPanel({ habit, snapshotCount, onSave, onCancel, onDelete, onArchive
       <div className="levels-editor">
         <div className="levels-editor-head">
           <span className="levels-editor-title">Levels</span>
-          <span className="levels-editor-hint">first row is the base — reorder freely; extras are bigger versions</span>
+          <span className="levels-editor-hint">
+            first row is the base; after {NORMAL_STREAK_DAYS} due days a higher level becomes Normal
+          </span>
         </div>
-        {habitHasLevels(habit) && (
-          <div className="level-row level-row-base">
-            <span className="level-base-label" title="Base level (habit name + per-completion price)">
-              Base · {name.trim() || habit.name}
-            </span>
-            <span className="level-base-price">${(parseFloat(price) || DEFAULT_PRICE).toFixed(2)}</span>
-            {normalLevelOf(habit) === 0 && (
-              <span className="level-normal-badge" title="Current normal level">Normal</span>
-            )}
-          </div>
-        )}
         {levels.map((lvl, i) => (
           <div className={`level-row${i === 0 ? ' level-row-base' : ''}`} key={i}>
             <div className="level-move">
@@ -1690,6 +1723,9 @@ function EditPanel({ habit, snapshotCount, onSave, onCancel, onDelete, onArchive
                 onKeyDown={e => { if (e.key === 'Enter') handleSave(); if (e.key === 'Escape') onCancel(); }}
               />
             </span>
+            {habitHasLevels(habit) && normalLevelOf(habit) === i && (
+              <span className="level-normal-badge" title="Current normal level">Normal</span>
+            )}
             <button
               className="level-remove"
               onClick={() => removeLevel(i)}
@@ -2033,29 +2069,22 @@ const HabitRow = memo(function HabitRow(
   const comp  = useMemo(() => new Set(habit.completions), [habit.completions]);
   const skip  = useMemo(() => new Set(habit.skips),       [habit.skips]);
   const fail  = useMemo(() => new Set(habit.fails),       [habit.fails]);
-  const cur  = useMemo(() => calcCurrentStreak(habit, isDue), [habit, isDue]);
-  const lon  = useMemo(() => calcLongestStreak(habit, isDue), [habit, isDue]);
-  const acc  = getAccent(habit.color);
-  const doneToday = comp.has(fmt(todayNoon()));   // completed for today?
-  const urgeMax   = lon > 0 && cur >= lon && !doneToday; // at record run but today not done yet
-
   const hasLevels   = habitHasLevels(habit);
   const levels      = useMemo(() => effectiveLevels(habit), [habit]); // base + extras
   const dayLevels   = habit.dayLevels ?? {};
   const activeLevelIdx = normalLevelOf(habit);
-  const cur  = useMemo(() => calcCurrentStreak(habit), [habit]);
-  const lvlCur = useMemo(() => calcCurrentLevelStreak(habit, activeLevelIdx), [habit, activeLevelIdx]);
-  const lvlMax = useMemo(() => calcLongestLevelStreak(habit, activeLevelIdx), [habit, activeLevelIdx]);
+  const cur    = useMemo(() => calcCurrentStreak(habit, isDue), [habit, isDue]);
+  const lvlCur = useMemo(() => calcCurrentLevelStreak(habit, activeLevelIdx, isDue), [habit, activeLevelIdx, isDue]);
+  const lvlMax = useMemo(() => calcLongestLevelStreak(habit, activeLevelIdx, isDue), [habit, activeLevelIdx, isDue]);
   const acc  = getAccent(habit.color);
   const todayStr = fmt(todayNoon());
   const doneToday = comp.has(todayStr);
   const doneTodayAtNormal = doneToday && dayLevelOf(habit, todayStr) >= activeLevelIdx;
-  const todayScheduled = isScheduledOn(habit, todayStr);
-  const urgeMax = lvlMax > 0 && lvlCur >= lvlMax && todayScheduled && !doneTodayAtNormal;
+  const todayDue = isDue(habit, todayStr);
+  const urgeMax = lvlMax > 0 && lvlCur >= lvlMax && todayDue && !doneTodayAtNormal;
 
   // Sidebar name is clickable (to pick level) only in non-edit mode with levels defined
   const nameClickable = hasLevels && !editMode && !boardDisabled;
-  const activeLevelIdx = Math.min(habit.activeLevel ?? 0, Math.max(0, levels.length - 1));
   const displayName = hasLevels ? levels[activeLevelIdx].name : habit.name;
 
   const wkCnt  = useMemo(() => countFrom(habit.completions, startOfWeek()),  [habit.completions]);
@@ -2128,7 +2157,11 @@ const HabitRow = memo(function HabitRow(
         const skpd  = skip.has(ds);
         const faild = fail.has(ds);
         const str   = (done || skpd) ? streakAt(habit, ds, isDue) : 0;
-        const bg    = cellBg(str, habit.color);
+        const dayLvl = (done && hasLevels) ? Math.min(dayLevels[ds] ?? 0, levels.length - 1) : 0;
+        const shadePenalty = (done && hasLevels && dayLvl < activeLevelIdx)
+          ? (activeLevelIdx - dayLvl)
+          : 0;
+        const bg    = cellBg(str, habit.color, shadePenalty);
         const isTd  = isCurrentDay && i === dates.length - 1;
 
         const prevDs = i > 0 ? fmt(dates[i - 1]) : null;
@@ -2168,7 +2201,7 @@ const HabitRow = memo(function HabitRow(
             {showLeft  && <div className="cell-skip cell-skip-left"  style={{ background: bg }} />}
             {showRight && <div className="cell-skip cell-skip-right" style={{ background: bg }} />}
             {faild && <div className="cell-fail" />}
-            {showLevelBar && (
+            {showLevelPips && (
               <div
                 className={`cell-level-pips${isMaxLevel ? ' is-max' : ''}`}
                 title={`${levels[dayLvl].name} · $${levels[dayLvl].price.toFixed(2)}`}
@@ -2187,7 +2220,8 @@ const HabitRow = memo(function HabitRow(
             {hasComment && (() => {
               // Accent fill + white ring so the dot stays visible on maxed-out
               // streak cells (same palette shade would otherwise blend in).
-              const dense = (done || skpd) && intensityIdx(str) >= 5;
+              const shadeIdx = Math.max(0, intensityIdx(str) - shadePenalty);
+              const dense = (done || skpd) && shadeIdx >= 5;
               return (
                 <div
                   className="comment-dot"
@@ -2334,8 +2368,9 @@ const DailyProgress = memo(function DailyProgress(
 // ─── MoneyMenu — top-right balance with a hover "spend" popover ──────────────
 
 const MoneyMenu = memo(function MoneyMenu(
-  { earned, spent, lastSpend, onSpend }: {
-    earned: number; spent: number; lastSpend: number; onSpend: (amt: number) => void;
+  { earned, spent, lastSpend, onSpend, onUndo }: {
+    earned: number; spent: number; lastSpend: number;
+    onSpend: (amt: number) => void; onUndo: () => void;
   }
 ) {
   const [open, setOpen] = useState(false);
@@ -2705,6 +2740,7 @@ export default function App() {
 
   // Cycle: empty → done → skip → fail → empty
   const toggle = useCallback((id: string, ds: string) => {
+    const due = makeIsDue(templates, fmt(todayNoon()), activeTemplateId, templateOverrideDate);
     setHabits(prev => prev.map(h => {
       if (h.id !== id) return h;
       const done = h.completions.includes(ds);
@@ -2720,7 +2756,7 @@ export default function App() {
           ? { ...(h.dayLevels ?? {}), [ds]: logged }
           : h.dayLevels;
         const next = { ...h, completions: [...h.completions, ds], dayLevels };
-        return hasLevels ? withAutoPromote(next, logged) : next;
+        return hasLevels ? withAutoPromote(next, logged, due) : next;
       }
       if (done)
         return { ...h, completions: h.completions.filter(c => c !== ds), skips: [...h.skips, ds], dayLevels: dropDayLevel(h.dayLevels, ds) };
@@ -2728,19 +2764,48 @@ export default function App() {
         return { ...h, skips: h.skips.filter(s => s !== ds), fails: [...h.fails, ds] };
       return { ...h, fails: h.fails.filter(f => f !== ds) };
     }));
+  }, [templates, activeTemplateId, templateOverrideDate]);
+
+  const closeAdd = useCallback(() => {
+    setAddPlacement(null);
+    addAnchorRef.current = null;
   }, []);
+
+  const openAdd = useCallback((
+    placement: 'footer' | 'end' | string,
+    anchor: HTMLButtonElement | null,
+  ) => {
+    if (addPlacement === placement) { closeAdd(); return; }
+    addAnchorRef.current = anchor;
+    setEditingId(null);
+    setAddPlacement(placement);
+  }, [addPlacement, closeAdd]);
 
   const addHabit = useCallback((name: string, color: string) => {
     const n = name.trim();
     if (!n) return;
     const id = `h-${Date.now()}`;
-    setHabits(prev => [...prev, {
+    const newHabit: Habit = {
       id, name: n, color,
       completions: [], skips: [], fails: [],
-    }]);
-    setBoardOrder(prev => [...prev, id]);
-    setAdding(false);
-  }, []);
+    };
+    const beforeId = (addPlacement && addPlacement !== 'footer' && addPlacement !== 'end')
+      ? addPlacement
+      : null;
+    setHabits(prev => [...prev, newHabit]);
+    setBoardOrder(prev => {
+      if (beforeId) {
+        const idx = prev.indexOf(beforeId);
+        if (idx >= 0) {
+          const next = [...prev];
+          next.splice(idx, 0, id);
+          return next;
+        }
+      }
+      return [...prev, id];
+    });
+    closeAdd();
+  }, [addPlacement, closeAdd]);
 
   const addSection = useCallback(() => {
     const id = `sec-${Date.now()}`;
@@ -3195,7 +3260,13 @@ export default function App() {
                 >
                   <HistoryIcon />
                 </button>
-                <MoneyMenu earned={totalMoney} spent={spent} lastSpend={lastSpend} onSpend={spend} />
+                <MoneyMenu
+                  earned={totalMoney}
+                  spent={spent}
+                  lastSpend={lastSpend}
+                  onSpend={spend}
+                  onUndo={undoLastSpend}
+                />
                 {!isMobile && <span className="username">Kevin ▾</span>}
               </div>
             </div>
@@ -3280,50 +3351,67 @@ export default function App() {
             ))}
 
             {/* ─ Board rows: sections + habits ─ */}
-            {boardRows.map(row => row.kind === 'section' ? (
-              <SectionRow
-                key={row.section.id}
-                section={row.section}
-                editMode={editMode}
-                isDragging={draggingId === row.section.id}
-                isDragOver={dragOverId === row.section.id && draggingId !== row.section.id}
-                sectionHidden={activeHiddenSections.has(row.section.id)}
-                canHideForBoard={!!activeTemplateId}
-                onRename={renameSection}
-                onDelete={deleteSection}
-                onToggleHidden={toggleSectionHidden}
-                onDragStartRow={handleDragStart}
-                onDragOverRow={handleDragOver}
-                onDropRow={reorderBoardItem}
-                onDragEndRow={handleDragEnd}
-              />
-            ) : (
-              <HabitRow
-                key={row.habit.id}
-                habit={row.habit}
-                dates={dates}
-                isCurrentDay={isCurrentDay}
-                isDue={isDue}
-                boardDisabled={activeDisabled.has(row.habit.id)}
-                canToggleBoardDisable={!!activeTemplateId}
-                onToggle={toggle}
-                onRightClick={openComment}
-                onCommentHover={showCommentTooltip}
-                onCommentLeave={hideCommentTooltip}
-                onToggleBoardDisable={toggleBoardDisable}
-                editMode={editMode}
-                isEditing={editingId === row.habit.id}
-                onOpenEdit={() => openEdit(row.habit.id)}
-                onOpenLevelPicker={openLevelPicker}
-                analyticsView={analyticsView}
-                isDragging={draggingId === row.habit.id}
-                isDragOver={dragOverId === row.habit.id && draggingId !== row.habit.id}
-                onDragStartRow={handleDragStart}
-                onDragOverRow={handleDragOver}
-                onDropRow={reorderBoardItem}
-                onDragEndRow={handleDragEnd}
-              />
-            ))}
+            {boardRows.map(row => {
+              const rowId = row.kind === 'section' ? row.section.id : row.habit.id;
+              return (
+                <Fragment key={rowId}>
+                  {editMode && (
+                    <div className="habit-insert-row">
+                      <button
+                        type="button"
+                        className={`habit-insert-btn${addPlacement === rowId ? ' active' : ''}`}
+                        title="Add habit here"
+                        onClick={e => openAdd(rowId, e.currentTarget)}
+                      >
+                        <span className="habit-insert-plus">+</span>
+                      </button>
+                    </div>
+                  )}
+                  {row.kind === 'section' ? (
+                    <SectionRow
+                      section={row.section}
+                      editMode={editMode}
+                      isDragging={draggingId === row.section.id}
+                      isDragOver={dragOverId === row.section.id && draggingId !== row.section.id}
+                      sectionHidden={activeHiddenSections.has(row.section.id)}
+                      canHideForBoard={!!activeTemplateId}
+                      onRename={renameSection}
+                      onDelete={deleteSection}
+                      onToggleHidden={toggleSectionHidden}
+                      onDragStartRow={handleDragStart}
+                      onDragOverRow={handleDragOver}
+                      onDropRow={reorderBoardItem}
+                      onDragEndRow={handleDragEnd}
+                    />
+                  ) : (
+                    <HabitRow
+                      habit={row.habit}
+                      dates={dates}
+                      isCurrentDay={isCurrentDay}
+                      isDue={isDue}
+                      boardDisabled={activeDisabled.has(row.habit.id)}
+                      canToggleBoardDisable={!!activeTemplateId}
+                      onToggle={toggle}
+                      onRightClick={openComment}
+                      onCommentHover={showCommentTooltip}
+                      onCommentLeave={hideCommentTooltip}
+                      onToggleBoardDisable={toggleBoardDisable}
+                      editMode={editMode}
+                      isEditing={editingId === row.habit.id}
+                      onOpenEdit={() => openEdit(row.habit.id)}
+                      onOpenLevelPicker={openLevelPicker}
+                      analyticsView={analyticsView}
+                      isDragging={draggingId === row.habit.id}
+                      isDragOver={dragOverId === row.habit.id && draggingId !== row.habit.id}
+                      onDragStartRow={handleDragStart}
+                      onDragOverRow={handleDragOver}
+                      onDropRow={reorderBoardItem}
+                      onDragEndRow={handleDragEnd}
+                    />
+                  )}
+                </Fragment>
+              );
+            })}
 
             {editMode && (
               <div className="habit-insert-row">
@@ -3343,8 +3431,8 @@ export default function App() {
               <div className="footer-add-row">
                 <button
                   ref={addBtnRef}
-                  className={`add-btn${adding ? ' active' : ''}`}
-                  onClick={() => setAdding(a => !a)}
+                  className={`add-btn${addPlacement === 'footer' ? ' active' : ''}`}
+                  onClick={() => openAdd('footer', addBtnRef.current)}
                 >
                   <span className="add-plus">+</span> New Habit
                 </button>
