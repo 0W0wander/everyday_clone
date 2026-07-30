@@ -4,13 +4,13 @@ import {
 import { createPortal } from 'react-dom';
 import './App.css';
 import type {
-  Habit, HabitColor, HabitLevel, HabitSchedule, HabitSnapshot, BoardSection, BoardTemplate,
+  Habit, HabitColor, HabitLevel, HabitSchedule, BoardSection, BoardTemplate,
 } from './types';
 import {
-  fetchRemote, pushRemote, isSyncConfigured,
-  listGistCommits, fetchRevision, type GistCommit,
+  fetchRemote, pushRemote, isSyncConfigured, fetchRevision,
 } from './sync';
 import { getQuote } from './quotes';
+import { MemoryGallery } from './Memory';
 
 // ─── Color utilities ──────────────────────────────────────────────────────────
 
@@ -85,7 +85,6 @@ const DAYS        = ['SUN','MON','TUE','WED','THU','FRI','SAT'];
 const STORAGE_KEY    = 'everyday-habits-v2';
 const SPENT_KEY      = 'everyday-spent-v1';
 const LAST_SPEND_KEY = 'everyday-last-spend-v1';
-const SNAPSHOTS_KEY  = 'everyday-snapshots-v1';
 const TEMPLATE_OVERRIDE_KEY = 'everyday-template-override-v1';
 const WEEKDAY_LABELS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
 const WEEKDAY_NAMES  = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -106,23 +105,6 @@ function loadLastSpend(): number {
   } catch { return 0; }
 }
 
-function loadSnapshots(): HabitSnapshot[] {
-  try {
-    const raw = localStorage.getItem(SNAPSHOTS_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((s): s is HabitSnapshot =>
-      !!s && typeof s === 'object'
-      && typeof s.id === 'string'
-      && typeof s.habitId === 'string'
-      && typeof s.at === 'string'
-      && typeof s.name === 'string'
-      && typeof s.color === 'string',
-    );
-  } catch { return []; }
-}
-
 /** Cloud / local sync blob shape (legacy payloads may omit newer fields). */
 interface SyncPayload {
   habits: Habit[];
@@ -132,7 +114,6 @@ interface SyncPayload {
   activeTemplateId?: string | null;
   spent: number;
   lastSpend?: number;
-  snapshots?: HabitSnapshot[];
 }
 
 interface BoardState {
@@ -147,13 +128,12 @@ function parseRemotePayload(raw: unknown): {
   board: BoardState | null;
   spent: number | null;
   lastSpend: number | null;
-  snapshots: HabitSnapshot[] | null;
 } {
   if (Array.isArray(raw)) {
-    return { board: boardFromLegacyHabits(raw), spent: null, lastSpend: null, snapshots: null };
+    return { board: boardFromLegacyHabits(raw), spent: null, lastSpend: null };
   }
   if (!raw || typeof raw !== 'object') {
-    return { board: null, spent: null, lastSpend: null, snapshots: null };
+    return { board: null, spent: null, lastSpend: null };
   }
   const obj = raw as {
     habits?: unknown;
@@ -163,7 +143,6 @@ function parseRemotePayload(raw: unknown): {
     activeTemplateId?: unknown;
     spent?: unknown;
     lastSpend?: unknown;
-    snapshots?: unknown;
   };
   const board = Array.isArray(obj.habits)
     ? sanitizeBoard(obj.habits, obj.sections, obj.boardOrder, obj.templates, obj.activeTemplateId)
@@ -171,18 +150,7 @@ function parseRemotePayload(raw: unknown): {
   const spent = typeof obj.spent === 'number' && Number.isFinite(obj.spent) ? Math.max(0, obj.spent) : null;
   const lastSpend = typeof obj.lastSpend === 'number' && Number.isFinite(obj.lastSpend)
     ? Math.max(0, obj.lastSpend) : null;
-  let snapshots: HabitSnapshot[] | null = null;
-  if (Array.isArray(obj.snapshots)) {
-    snapshots = obj.snapshots.filter((s): s is HabitSnapshot =>
-      !!s && typeof s === 'object'
-      && typeof (s as HabitSnapshot).id === 'string'
-      && typeof (s as HabitSnapshot).habitId === 'string'
-      && typeof (s as HabitSnapshot).at === 'string'
-      && typeof (s as HabitSnapshot).name === 'string'
-      && typeof (s as HabitSnapshot).color === 'string',
-    );
-  }
-  return { board, spent, lastSpend, snapshots };
+  return { board, spent, lastSpend };
 }
 
 function loadTemplateOverrideDate(): string | null {
@@ -197,57 +165,6 @@ function saveTemplateOverrideDate(ds: string | null) {
     if (ds) localStorage.setItem(TEMPLATE_OVERRIDE_KEY, ds);
     else localStorage.removeItem(TEMPLATE_OVERRIDE_KEY);
   } catch { /* noop */ }
-}
-
-function snapshotFromHabit(h: Habit): HabitSnapshot {
-  return {
-    id: `snap-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-    habitId: h.id,
-    at: new Date().toISOString(),
-    name: h.name,
-    color: h.color,
-    price: h.price,
-    levels: h.levels ? h.levels.map(l => ({ ...l })) : undefined,
-    schedule: h.schedule ? structuredClone(h.schedule) : undefined,
-  };
-}
-
-function defChanged(
-  h: Habit,
-  next: {
-    name: string; color: HabitColor; price: number;
-    levels: HabitLevel[]; schedule: HabitSchedule | undefined;
-  },
-): boolean {
-  if (h.name !== next.name) return true;
-  if (h.color !== next.color) return true;
-  if ((h.price ?? DEFAULT_PRICE) !== next.price) return true;
-  if (JSON.stringify(h.levels ?? []) !== JSON.stringify(next.levels)) return true;
-  if (JSON.stringify(h.schedule ?? null) !== JSON.stringify(next.schedule ?? null)) return true;
-  return false;
-}
-
-function formatRelativeTime(iso: string): string {
-  const t = new Date(iso).getTime();
-  if (!Number.isFinite(t)) return iso;
-  const sec = Math.round((Date.now() - t) / 1000);
-  if (sec < 60) return 'just now';
-  const min = Math.round(sec / 60);
-  if (min < 60) return `${min}m ago`;
-  const hr = Math.round(min / 60);
-  if (hr < 48) return `${hr}h ago`;
-  const days = Math.round(hr / 24);
-  if (days < 30) return `${days}d ago`;
-  return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
-}
-
-function formatSnapshotWhen(iso: string): string {
-  const d = new Date(iso);
-  if (!Number.isFinite(d.getTime())) return iso;
-  return d.toLocaleString(undefined, {
-    month: 'short', day: 'numeric', year: 'numeric',
-    hour: 'numeric', minute: '2-digit',
-  });
 }
 
 // ─── Responsive layout ────────────────────────────────────────────────────────
@@ -629,7 +546,7 @@ function sanitize(h: Partial<Habit>): Habit {
     activeLevel: (typeof h.activeLevel === 'number' && isFinite(h.activeLevel) && h.activeLevel >= 0) ? Math.floor(h.activeLevel) : undefined,
     schedule:    sanitizeSchedule(h.schedule),
     isBreak:  !!h.isBreak,
-    archived: !!h.archived,
+    archived: false, // archival removed — resurrect any previously archived habits
     comments: (h.comments && typeof h.comments === 'object' && !Array.isArray(h.comments))
       ? Object.fromEntries(
           Object.entries(h.comments as Record<string, unknown>)
@@ -881,63 +798,6 @@ function loadBoard(): BoardState {
     }
   } catch { /* noop */ }
   return emptyBoard();
-}
-
-// ─── ArchivePanel ─────────────────────────────────────────────────────────────
-
-interface ArchivePanelProps {
-  archivedHabits: Habit[];
-  onRestore: (id: string) => void;
-  onDelete:  (id: string) => void;
-  onClose:   () => void;
-}
-
-function ArchivePanel({ archivedHabits, onRestore, onDelete, onClose }: ArchivePanelProps) {
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
-    document.addEventListener('keydown', handler);
-    return () => document.removeEventListener('keydown', handler);
-  }, [onClose]);
-
-  return createPortal(
-    <div className="archive-overlay" onClick={onClose}>
-      <div className="archive-panel" onClick={e => e.stopPropagation()}>
-        <div className="archive-panel-header">
-          <div className="archive-panel-title-group">
-            <BoxArchiveIcon />
-            <span className="archive-panel-title">Archived Habits</span>
-          </div>
-          <button className="archive-close-btn" onClick={onClose}>✕</button>
-        </div>
-        {archivedHabits.length === 0 ? (
-          <p className="archive-empty">No archived habits yet.</p>
-        ) : (
-          <ul className="archive-list">
-            {archivedHabits.map(h => (
-              <li key={h.id} className="archive-item">
-                <div
-                  className="archive-color-dot"
-                  style={{ backgroundColor: getPalette(h.color)[5] }}
-                />
-                <span className="archive-item-name">{h.name}</span>
-                <button className="btn-restore" onClick={() => onRestore(h.id)}>
-                  Restore
-                </button>
-                <button
-                  className="btn-delete-perm"
-                  onClick={() => onDelete(h.id)}
-                  title="Delete permanently"
-                >
-                  <TrashIcon />
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-    </div>,
-    document.body,
-  );
 }
 
 // ─── TemplatePicker — header dropdown to select a board template ─────────────
@@ -1205,214 +1065,6 @@ function TemplatesManagePanel({
   );
 }
 
-// ─── SyncHistoryPanel — restore one of the previous 3 cloud commits ───────────
-
-interface SyncHistoryPanelProps {
-  onRestore: (sha: string) => Promise<void>;
-  onClose: () => void;
-}
-
-function SyncHistoryPanel({ onRestore, onClose }: SyncHistoryPanelProps) {
-  const [commits, setCommits] = useState<GistCommit[] | null>(null);
-  const [error, setError]     = useState<string | null>(null);
-  const [busy, setBusy]       = useState<string | null>(null);
-
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
-    document.addEventListener('keydown', handler);
-    return () => document.removeEventListener('keydown', handler);
-  }, [onClose]);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      const result = await listGistCommits(4);
-      if (cancelled) return;
-      if (!result.ok) {
-        setError(result.error);
-        setCommits([]);
-        return;
-      }
-      // Skip index 0 (current HEAD); offer the previous three.
-      setCommits(result.data.slice(1, 4));
-    })();
-    return () => { cancelled = true; };
-  }, []);
-
-  const restore = async (sha: string) => {
-    if (!window.confirm('Replace your current data with this earlier cloud version? Your current state will be overwritten and synced.')) return;
-    setBusy(sha);
-    try {
-      await onRestore(sha);
-      onClose();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  return createPortal(
-    <div className="archive-overlay" onClick={onClose}>
-      <div className="archive-panel" onClick={e => e.stopPropagation()}>
-        <div className="archive-panel-header">
-          <div className="archive-panel-title-group">
-            <HistoryIcon />
-            <span className="archive-panel-title">Cloud history</span>
-          </div>
-          <button className="archive-close-btn" onClick={onClose}>✕</button>
-        </div>
-        <p className="history-hint">
-          Go back up to three previous syncs — useful if another computer overwrote your data.
-        </p>
-        {error && <p className="history-error">{error}</p>}
-        {commits === null ? (
-          <p className="archive-empty">Loading revisions…</p>
-        ) : commits.length === 0 ? (
-          <p className="archive-empty">No earlier versions yet. Sync a few times first.</p>
-        ) : (
-          <ul className="archive-list">
-            {commits.map((c, i) => (
-              <li key={c.version} className="archive-item history-item">
-                <div className="history-item-meta">
-                  <span className="history-item-label">
-                    {i === 0 ? 'Previous sync' : i === 1 ? '2 syncs ago' : '3 syncs ago'}
-                  </span>
-                  <span className="history-item-time">{formatRelativeTime(c.committed_at)}</span>
-                </div>
-                <button
-                  className="btn-restore"
-                  disabled={busy !== null}
-                  onClick={() => restore(c.version)}
-                >
-                  {busy === c.version ? 'Restoring…' : 'Restore'}
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-    </div>,
-    document.body,
-  );
-}
-
-// ─── HabitHistoryPanel — browse definition snapshots for one habit ────────────
-
-interface HabitHistoryPanelProps {
-  habitName: string;
-  snapshots: HabitSnapshot[];
-  onRestore: (snap: HabitSnapshot) => void;
-  onClose: () => void;
-}
-
-function HabitHistoryPanel({ habitName, snapshots, onRestore, onClose }: HabitHistoryPanelProps) {
-  const [expanded, setExpanded] = useState<string | null>(null);
-
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
-    document.addEventListener('keydown', handler);
-    return () => document.removeEventListener('keydown', handler);
-  }, [onClose]);
-
-  const sorted = useMemo(
-    () => [...snapshots].sort((a, b) => b.at.localeCompare(a.at)),
-    [snapshots],
-  );
-
-  return createPortal(
-    <div className="archive-overlay" onClick={onClose}>
-      <div className="archive-panel habit-history-panel" onClick={e => e.stopPropagation()}>
-        <div className="archive-panel-header">
-          <div className="archive-panel-title-group">
-            <HistoryIcon />
-            <span className="archive-panel-title">History — {habitName}</span>
-          </div>
-          <button className="archive-close-btn" onClick={onClose}>✕</button>
-        </div>
-        <p className="history-hint">
-          Snapshots are saved whenever you edit this habit’s name, levels, price, or schedule.
-        </p>
-        {sorted.length === 0 ? (
-          <p className="archive-empty">No snapshots yet. Edit and save this habit to start a timeline.</p>
-        ) : (
-          <ul className="archive-list">
-            {sorted.map(s => {
-              const open = expanded === s.id;
-              const levelNames = [
-                s.name,
-                ...(s.levels ?? []).map(l => l.name),
-              ].filter(Boolean);
-              return (
-                <li key={s.id} className="habit-snap-item">
-                  <button
-                    className="habit-snap-header"
-                    onClick={() => setExpanded(open ? null : s.id)}
-                  >
-                    <div
-                      className="archive-color-dot"
-                      style={{ backgroundColor: getPalette(s.color)[5] }}
-                    />
-                    <div className="habit-snap-summary">
-                      <span className="habit-snap-name">{s.name}</span>
-                      <span className="habit-snap-when">{formatSnapshotWhen(s.at)}</span>
-                    </div>
-                    <span className="habit-snap-chevron">{open ? '▾' : '▸'}</span>
-                  </button>
-                  {open && (
-                    <div className="habit-snap-body">
-                      <div className="habit-snap-row">
-                        <span>Base price</span>
-                        <span>${(s.price ?? DEFAULT_PRICE).toFixed(2)}</span>
-                      </div>
-                      {levelNames.length > 1 && (
-                        <div className="habit-snap-levels">
-                          <span className="habit-snap-levels-label">Levels</span>
-                          <ol>
-                            {levelNames.map((n, i) => {
-                              const price = i === 0
-                                ? (s.price ?? DEFAULT_PRICE)
-                                : (s.levels?.[i - 1]?.price ?? DEFAULT_PRICE);
-                              return (
-                                <li key={i}>{n} · ${price.toFixed(2)}</li>
-                              );
-                            })}
-                          </ol>
-                        </div>
-                      )}
-                      {s.schedule && (
-                        <div className="habit-snap-row">
-                          <span>Schedule</span>
-                          <span>
-                            {s.schedule.type === 'daily' && 'Every day'}
-                            {s.schedule.type === 'weekly' && `Weekdays: ${s.schedule.weekdays.join(',')}`}
-                            {s.schedule.type === 'interval' && `Every ${s.schedule.every}d cooldown`}
-                          </span>
-                        </div>
-                      )}
-                      <button
-                        className="btn-restore habit-snap-restore"
-                        onClick={() => {
-                          if (!window.confirm('Restore this habit’s name, levels, and settings from this snapshot? Completions stay as they are.')) return;
-                          onRestore(s);
-                          onClose();
-                        }}
-                      >
-                        Restore this version
-                      </button>
-                    </div>
-                  )}
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </div>
-    </div>,
-    document.body,
-  );
-}
-
 // ─── CommentPopover ───────────────────────────────────────────────────────────
 
 interface CommentPopoverProps {
@@ -1534,18 +1186,15 @@ function useAnchoredPosition(
 
 interface EditPanelProps {
   habit: Habit;
-  snapshotCount: number;
   onSave:     (name: string, color: HabitColor, price: number, levels: HabitLevel[], schedule: HabitSchedule | undefined) => void;
   onCancel:   () => void;
   onDelete:   () => void;
-  onArchive:  () => void;
-  onHistory:  () => void;
 }
 
 // Draft level row in the editor — price kept as string for free typing
 interface LevelDraft { name: string; price: string; }
 
-function EditPanel({ habit, snapshotCount, onSave, onCancel, onDelete, onArchive, onHistory }: EditPanelProps) {
+function EditPanel({ habit, onSave, onCancel, onDelete }: EditPanelProps) {
   const [color, setColor] = useState<string>(habit.color);
   // Levels draft always includes the base level as row 0 (habit name + price).
   const [levels, setLevels] = useState<LevelDraft[]>(() => [
@@ -1728,17 +1377,6 @@ function EditPanel({ habit, snapshotCount, onSave, onCancel, onDelete, onArchive
       <div className="edit-panel-actions">
         <button className="btn-save" onClick={handleSave}>Save</button>
         <button className="btn-cancel" onClick={onCancel}>Cancel</button>
-        <button
-          className="btn-history"
-          onClick={onHistory}
-          title={snapshotCount > 0 ? `View ${snapshotCount} snapshot${snapshotCount === 1 ? '' : 's'}` : 'View habit history'}
-        >
-          <HistoryIcon />
-          {snapshotCount > 0 && <span className="btn-history-count">{snapshotCount}</span>}
-        </button>
-        <button className="btn-archive" onClick={onArchive} title="Archive habit">
-          <ArchiveIcon />
-        </button>
         <button className="btn-delete" onClick={onDelete} title="Delete habit">
           <TrashIcon />
         </button>
@@ -2377,7 +2015,6 @@ export default function App() {
   const [adding,         setAdding]         = useState(false);
   const [spent,          setSpent]          = useState<number>(loadSpent);
   const [lastSpend,      setLastSpend]      = useState<number>(loadLastSpend);
-  const [snapshots,      setSnapshots]      = useState<HabitSnapshot[]>(loadSnapshots);
   const [editMode,       setEditMode]       = useState(false);
   const [showAllHabits,  setShowAllHabits]  = useState(false);
   const [editingId,      setEditingId]      = useState<string | null>(null);
@@ -2387,8 +2024,7 @@ export default function App() {
   const [analyticsView,  setAnalyticsView]  = useState<0 | 1 | 2>(0);
   const [syncStatus,  setSyncStatus]  = useState<'idle'|'syncing'|'synced'|'error'>('idle');
   const [syncToast,   setSyncToast]   = useState<{ type: 'success'|'error'; msg: string } | null>(null);
-  const [showSyncHistory, setShowSyncHistory] = useState(false);
-  const [historyHabitId,  setHistoryHabitId]  = useState<string | null>(null);
+  const [showMemory, setShowMemory] = useState(false);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const showToast = useCallback((type: 'success'|'error', msg: string) => {
@@ -2396,7 +2032,6 @@ export default function App() {
     if (toastTimer.current) clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setSyncToast(null), 5000);
   }, []);
-  const [showArchive,    setShowArchive]    = useState(false);
   const [commentTarget,  setCommentTarget]  = useState<{ id: string; ds: string; rect: DOMRect } | null>(null);
   const [commentTooltip, setCommentTooltip] = useState<{ text: string; ds: string; rect: DOMRect } | null>(null);
   const addBtnRef    = useRef<HTMLButtonElement>(null);
@@ -2410,7 +2045,6 @@ export default function App() {
   const activeTemplateIdRef = useRef<string | null>(activeTemplateId);
   const spentRef     = useRef<number>(spent);
   const lastSpendRef = useRef<number>(lastSpend);
-  const snapshotsRef = useRef<HabitSnapshot[]>(snapshots);
 
   const vw     = useViewportWidth();
   const layout = useMemo(() => getLayout(vw), [vw]);
@@ -2418,19 +2052,13 @@ export default function App() {
   const dates        = useMemo(() => getVisibleDates(offset, layout.daysBack), [offset, layout.daysBack]);
   const isCurrentDay = offset === 0;
 
-  // Split into active (visible) and archived
-  const visibleHabits  = useMemo(() => habits.filter(h => !h.archived), [habits]);
-  const archivedHabits = useMemo(() => habits.filter(h =>  h.archived), [habits]);
+  const visibleHabits = habits;
 
   useEffect(() => { localStorage.setItem(SPENT_KEY, String(spent)); spentRef.current = spent; }, [spent]);
   useEffect(() => {
     localStorage.setItem(LAST_SPEND_KEY, String(lastSpend));
     lastSpendRef.current = lastSpend;
   }, [lastSpend]);
-  useEffect(() => {
-    localStorage.setItem(SNAPSHOTS_KEY, JSON.stringify(snapshots));
-    snapshotsRef.current = snapshots;
-  }, [snapshots]);
   useEffect(() => {
     saveTemplateOverrideDate(templateOverrideDate);
   }, [templateOverrideDate]);
@@ -2443,7 +2071,6 @@ export default function App() {
     activeTemplateId: activeTemplateIdRef.current,
     spent: spentRef.current,
     lastSpend: lastSpendRef.current,
-    snapshots: snapshotsRef.current,
   }), []);
 
   const applyBoard = useCallback((board: BoardState) => {
@@ -2599,7 +2226,7 @@ export default function App() {
     }, 1500);
   }, [habits, sections, boardOrder, templates, activeTemplateId, buildPayload]);
 
-  // Also push when spent / lastSpend / snapshots change (debounced separately)
+  // Also push when spent / lastSpend change (debounced separately)
   const spentSyncTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     if (isFirstLoad.current) return;
@@ -2610,7 +2237,7 @@ export default function App() {
         setSyncStatus(result.ok ? 'synced' : 'error');
       });
     }, 1500);
-  }, [spent, lastSpend, snapshots, buildPayload]);
+  }, [spent, lastSpend, buildPayload]);
 
   useEffect(() => {
     habitsRef.current = habits;
@@ -2620,8 +2247,7 @@ export default function App() {
     activeTemplateIdRef.current = activeTemplateId;
     spentRef.current = spent;
     lastSpendRef.current = lastSpend;
-    snapshotsRef.current = snapshots;
-  }, [habits, sections, boardOrder, templates, activeTemplateId, spent, lastSpend, snapshots]);
+  }, [habits, sections, boardOrder, templates, activeTemplateId, spent, lastSpend]);
 
   useEffect(() => {
     if (!isSyncConfigured()) return;
@@ -2635,7 +2261,6 @@ export default function App() {
           applyBoard(parsed.board);
           if (parsed.spent !== null) setSpent(parsed.spent);
           if (parsed.lastSpend !== null) setLastSpend(parsed.lastSpend);
-          if (parsed.snapshots !== null) setSnapshots(parsed.snapshots);
         } else {
           // Nothing valid on remote — push local state to initialise
           pushRemote(buildPayload());
@@ -2705,11 +2330,6 @@ export default function App() {
   }, []);
 
   const saveEdit = useCallback((name: string, color: HabitColor, price: number, levels: HabitLevel[], schedule: HabitSchedule | undefined) => {
-    const nextVals = { name, color, price, levels, schedule };
-    const current = habitsRef.current.find(h => h.id === editingId);
-    if (current && defChanged(current, nextVals)) {
-      setSnapshots(snaps => [snapshotFromHabit(current), ...snaps]);
-    }
     setHabits(prev => prev.map(h => {
       if (h.id !== editingId) return h;
       const hasLevels = levels.length > 0;
@@ -2735,39 +2355,6 @@ export default function App() {
     setEditingId(null);
   }, [editingId]);
 
-  const restoreHabitSnapshot = useCallback((snap: HabitSnapshot) => {
-    const current = habitsRef.current.find(h => h.id === snap.habitId);
-    if (current) {
-      setSnapshots(snaps => [snapshotFromHabit(current), ...snaps]);
-    }
-    setHabits(prev => prev.map(h => {
-      if (h.id !== snap.habitId) return h;
-      const levels = snap.levels?.length ? snap.levels.map(l => ({ ...l })) : undefined;
-      const hasLevels = (levels?.length ?? 0) > 0;
-      const maxIdx = levels?.length ?? 0;
-      let dayLevels = h.dayLevels;
-      if (!hasLevels) {
-        dayLevels = undefined;
-      } else if (dayLevels) {
-        dayLevels = Object.fromEntries(
-          Object.entries(dayLevels).map(([k, v]) => [k, Math.min(v, maxIdx)])
-        );
-      }
-      return {
-        ...h,
-        name: snap.name,
-        color: snap.color,
-        price: snap.price,
-        levels,
-        schedule: snap.schedule ? structuredClone(snap.schedule) : undefined,
-        dayLevels,
-        activeLevel: hasLevels ? Math.min(h.activeLevel ?? 0, maxIdx) : undefined,
-      };
-    }));
-    setEditingId(null);
-    showToast('success', 'Habit restored from snapshot');
-  }, [showToast]);
-
   // Set the currently-active level for a habit (used for new completions).
   // Also remember it on the active board template (e.g. lower level on weekends).
   const setActiveLevel = useCallback((id: string, level: number) => {
@@ -2785,11 +2372,6 @@ export default function App() {
     const id = editingId;
     setHabits(prev => prev.filter(h => h.id !== id));
     if (id) setBoardOrder(prev => prev.filter(x => x !== id));
-    setEditingId(null);
-  }, [editingId]);
-
-  const archiveHabit = useCallback(() => {
-    setHabits(prev => prev.map(h => h.id === editingId ? { ...h, archived: true } : h));
     setEditingId(null);
   }, [editingId]);
 
@@ -2836,7 +2418,6 @@ export default function App() {
     applyBoard(parsed.board);
     if (parsed.spent !== null) setSpent(parsed.spent);
     if (parsed.lastSpend !== null) setLastSpend(parsed.lastSpend);
-    if (parsed.snapshots !== null) setSnapshots(parsed.snapshots);
     // Push restored state as the new HEAD so other devices pick it up
     const pushResult = await pushRemote({
       habits: parsed.board.habits,
@@ -2846,7 +2427,6 @@ export default function App() {
       activeTemplateId: parsed.board.activeTemplateId,
       spent: parsed.spent ?? spentRef.current,
       lastSpend: parsed.lastSpend ?? lastSpendRef.current,
-      snapshots: parsed.snapshots ?? snapshotsRef.current,
     });
     if (!pushResult.ok) {
       setSyncStatus('error');
@@ -2856,17 +2436,6 @@ export default function App() {
     setSyncStatus('synced');
     showToast('success', 'Restored previous cloud version ✓');
   }, [showToast, applyBoard]);
-
-  const restoreHabit = useCallback((id: string) => {
-    setHabits(prev => prev.map(h => h.id === id ? { ...h, archived: false } : h));
-    setBoardOrder(prev => prev.includes(id) ? prev : [...prev, id]);
-  }, []);
-
-  const deleteArchivedHabit = useCallback((id: string) => {
-    if (!window.confirm('Permanently delete this habit and all its data?')) return;
-    setHabits(prev => prev.filter(h => h.id !== id));
-    setBoardOrder(prev => prev.filter(x => x !== id));
-  }, []);
 
   // Drag-and-drop reordering for habits and sections (edit mode)
   const handleDragStart = useCallback((id: string) => setDraggingId(id), []);
@@ -3135,9 +2704,9 @@ export default function App() {
                       showToast('error', 'Sync not configured — add VITE_GIST_ID and VITE_GITHUB_TOKEN in Vercel settings');
                       return;
                     }
-                    setShowSyncHistory(true);
+                    setShowMemory(true);
                   }}
-                  title="Restore a previous cloud sync"
+                  title="Memory — browse past syncs"
                 >
                   <HistoryIcon />
                 </button>
@@ -3172,16 +2741,6 @@ export default function App() {
                   onSelect={id => applyTemplateById(id, true)}
                   onManage={() => setShowTemplates(true)}
                 />
-                {editMode && archivedHabits.length > 0 && (
-                  <button
-                    className="archive-count-btn"
-                    onClick={() => setShowArchive(true)}
-                    title="View archived habits"
-                  >
-                    <BoxArchiveIcon />
-                    <span>{archivedHabits.length}</span>
-                  </button>
-                )}
                 <button
                   className={`eye-btn${showAllHabits ? ' active' : ''}`}
                   onClick={() => setShowAllHabits(v => !v)}
@@ -3331,15 +2890,9 @@ export default function App() {
       {editingHabit && (
         <EditPanel
           habit={editingHabit}
-          snapshotCount={snapshots.filter(s => s.habitId === editingHabit.id).length}
           onSave={saveEdit}
           onCancel={cancelEdit}
           onDelete={deleteHabit}
-          onArchive={archiveHabit}
-          onHistory={() => {
-            setHistoryHabitId(editingHabit.id);
-            setEditingId(null);
-          }}
         />
       )}
 
@@ -3349,16 +2902,6 @@ export default function App() {
           habit={levelPickerHabit}
           onPick={lvl => setActiveLevel(levelPickerHabit.id, lvl)}
           onClose={() => setLevelPickerId(null)}
-        />
-      )}
-
-      {/* ── Archive Panel ── */}
-      {showArchive && (
-        <ArchivePanel
-          archivedHabits={archivedHabits}
-          onRestore={restoreHabit}
-          onDelete={deleteArchivedHabit}
-          onClose={() => setShowArchive(false)}
         />
       )}
 
@@ -3377,26 +2920,13 @@ export default function App() {
         />
       )}
 
-      {/* ── Cloud sync history ── */}
-      {showSyncHistory && (
-        <SyncHistoryPanel
+      {/* ── Memory gallery (past cloud syncs) ── */}
+      {showMemory && (
+        <MemoryGallery
           onRestore={restoreCloudRevision}
-          onClose={() => setShowSyncHistory(false)}
+          onClose={() => setShowMemory(false)}
         />
       )}
-
-      {/* ── Habit definition history ── */}
-      {historyHabitId && (() => {
-        const h = habits.find(x => x.id === historyHabitId);
-        return (
-          <HabitHistoryPanel
-            habitName={h?.name ?? 'Habit'}
-            snapshots={snapshots.filter(s => s.habitId === historyHabitId)}
-            onRestore={restoreHabitSnapshot}
-            onClose={() => setHistoryHabitId(null)}
-          />
-        );
-      })()}
 
       {/* ── Comment Popover ── */}
       {commentTarget && (() => {
@@ -3467,26 +2997,6 @@ function TrashIcon() {
       stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/>
       <path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/>
-    </svg>
-  );
-}
-function ArchiveIcon() {
-  return (
-    <svg width="13" height="13" viewBox="0 0 24 24" fill="none"
-      stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <polyline points="21 8 21 21 3 21 3 8"/>
-      <rect x="1" y="3" width="22" height="5"/>
-      <line x1="10" y1="12" x2="14" y2="12"/>
-    </svg>
-  );
-}
-function BoxArchiveIcon() {
-  return (
-    <svg width="11" height="11" viewBox="0 0 24 24" fill="none"
-      stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-      <polyline points="21 8 21 21 3 21 3 8"/>
-      <rect x="1" y="3" width="22" height="5"/>
-      <line x1="10" y1="12" x2="14" y2="12"/>
     </svg>
   );
 }
