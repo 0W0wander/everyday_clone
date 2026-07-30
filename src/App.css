@@ -127,6 +127,12 @@ body {
   cursor: pointer; white-space: nowrap; transition: background 0.1s;
 }
 .btn-spend:hover { background: #15803d; }
+.btn-undo {
+  background: #f8fafc; color: #475569; border: 1px solid #e2e8f0; border-radius: 6px;
+  padding: 5px 10px; font-size: 12px; font-weight: 600; font-family: inherit;
+  cursor: pointer; transition: background 0.1s, color 0.1s, border-color 0.1s;
+}
+.btn-undo:hover { background: #fef2f2; color: #dc2626; border-color: #fecaca; }
 .money-reset {
   background: none; border: none; color: #94a3b8; cursor: pointer;
   font-size: 11px; font-family: inherit; padding: 0; text-align: left;
@@ -367,6 +373,78 @@ body {
   border-left: 1px solid #e2e8f0;
 }
 
+/* ─── Insert-habit gutter (edit mode, between board rows) ─────────────────── */
+.habit-insert-row {
+  grid-column: 1 / -1;
+  position: relative;
+  height: 4px;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  padding-left: 18px;
+}
+.habit-insert-row::after {
+  content: '';
+  position: absolute;
+  inset: -8px 0;
+  z-index: 0;
+}
+.habit-insert-row::before {
+  content: '';
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  top: 50%;
+  height: 1px;
+  background: transparent;
+  transition: background 0.12s;
+  pointer-events: none;
+  z-index: 0;
+}
+.habit-insert-row:hover::before,
+.habit-insert-row:focus-within::before {
+  background: #bfdbfe;
+}
+.habit-insert-btn {
+  position: relative;
+  z-index: 1;
+  width: 18px;
+  height: 18px;
+  margin-top: -6px;
+  margin-bottom: -6px;
+  border-radius: 50%;
+  border: 1px solid #bfdbfe;
+  background: #eff6ff;
+  color: #2563eb;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 0;
+  opacity: 0;
+  transform: scale(0.85);
+  transition: opacity 0.12s, transform 0.12s, background 0.1s, border-color 0.1s;
+  font-family: inherit;
+}
+.habit-insert-row:hover .habit-insert-btn,
+.habit-insert-row:focus-within .habit-insert-btn,
+.habit-insert-btn.active {
+  opacity: 1;
+  transform: scale(1);
+}
+.habit-insert-btn:hover,
+.habit-insert-btn.active {
+  background: #dbeafe;
+  border-color: #93c5fd;
+}
+.habit-insert-plus {
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
+  margin-top: -1px;
+}
+
 /* ─── Section divider row (independent board item) ───────────────────────── */
 .section-divider {
   grid-column: 1 / -1;
@@ -583,17 +661,32 @@ body {
 .cell-fail::before { transform: rotate(45deg); }
 .cell-fail::after  { transform: rotate(-45deg); }
 
-/* Level indicator: subtle bar centered at the bottom of a completed cell.
-   Wider bar = higher level. */
-.cell-level-bar {
+/* Level indicator: discrete pips at the bottom of a completed cell.
+   Filled count = level index + 1; max level gets a stronger look. */
+.cell-level-pips {
   position: absolute;
-  bottom: 2px;
+  bottom: 3px;
   left: 50%;
   transform: translateX(-50%);
-  height: 3px;
-  border-radius: 2px;
-  opacity: 0.9;
+  display: flex;
+  align-items: center;
+  gap: 2px;
   pointer-events: none;
+}
+.cell-level-pip {
+  width: 4px;
+  height: 4px;
+  border-radius: 1px;
+  background: rgba(15, 23, 42, 0.14);
+  box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.08);
+}
+.cell-level-pip.filled {
+  box-shadow: none;
+  opacity: 0.95;
+}
+.cell-level-pips.is-max .cell-level-pip.filled {
+  height: 5px;
+  opacity: 1;
 }
 
 /* Today column: subtle tint only, no side borders */
@@ -860,6 +953,17 @@ body {
   text-transform: uppercase; color: #2563eb;
   background: #eff6ff; border: 1px solid #bfdbfe;
   border-radius: 4px; padding: 2px 5px;
+}
+.level-normal-badge {
+  flex-shrink: 0;
+  font-size: 9px; font-weight: 800; letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: #15803d;
+  background: #dcfce7;
+  border: 1px solid #bbf7d0;
+  border-radius: 4px;
+  padding: 2px 5px;
+  line-height: 1.2;
 }
 .level-move { display: flex; flex-direction: column; gap: 1px; }
 .level-move-btn {
