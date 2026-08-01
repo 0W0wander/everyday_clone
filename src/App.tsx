@@ -11,6 +11,7 @@ import {
 } from './sync';
 import { getQuote } from './quotes';
 import { MemoryGallery } from './Memory';
+import { VictoryCelebration } from './Victory';
 
 // ─── Color utilities ──────────────────────────────────────────────────────────
 
@@ -2777,6 +2778,18 @@ export default function App() {
   const todayDone  = todayPips.filter(p => p.done).length;
   const todayMoney = todayPips.reduce((s, p) => s + p.earned, 0);
   const dayStreak  = useMemo(() => calcDayStreak(visibleHabits, isDue), [visibleHabits, isDue]);
+  const dayPerfect = todayPips.length > 0 && todayDone === todayPips.length;
+  const [victoryBlast, setVictoryBlast] = useState(false);
+  const wasPerfectRef = useRef(false);
+  useEffect(() => {
+    if (dayPerfect && !wasPerfectRef.current) {
+      setVictoryBlast(true);
+      const t = setTimeout(() => setVictoryBlast(false), 4200);
+      wasPerfectRef.current = true;
+      return () => clearTimeout(t);
+    }
+    if (!dayPerfect) wasPerfectRef.current = false;
+  }, [dayPerfect]);
 
   type BoardRow =
     | { kind: 'section'; section: BoardSection }
@@ -2885,9 +2898,13 @@ export default function App() {
   const levelPickerHabit = levelPickerId ? visibleHabits.find(h => h.id === levelPickerId) : null;
 
   return (
-    <div className={`app${isMobile ? ' mobile' : ''}`} style={{ '--row-h': `${rowH}px` } as React.CSSProperties}>
+    <div
+      className={`app${isMobile ? ' mobile' : ''}${victoryBlast ? ' victory-blast' : ''}${dayPerfect ? ' victory-complete' : ''}`}
+      style={{ '--row-h': `${rowH}px` } as React.CSSProperties}
+    >
+      <VictoryCelebration active={dayPerfect} />
       {/* ── Unified header (toolbar + daily progress) ── */}
-      <header className={`app-header${todayDone > 0 && todayDone === todayPips.length && todayPips.length > 0 ? ' is-complete' : ''}`}>
+      <header className={`app-header${dayPerfect ? ' is-complete' : ''}`}>
         <DailyProgress
           pips={todayPips}
           done={todayDone}
