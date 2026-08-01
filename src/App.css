@@ -601,28 +601,54 @@ body {
 }
 .habit-name.board-disabled { background: #f8fafc; }
 
-/* Todolist settle — heavy strike across the date strip (where eyes go) */
+/* Todolist settle — thin crossed-out stripe (collapse mode) */
 .habit-name.habit-done-pending {
-  transition: background 0.25s ease;
+  transition: background 0.25s ease, height 0.35s ease;
   background: #f0fdf4;
 }
+.habit-name.habit-done-settled,
+.habit-cell.habit-done-settled,
+.stat-cell.habit-done-settled {
+  height: 20px;
+  transition: height 0.4s ease, opacity 0.4s ease, filter 0.4s ease;
+}
 .habit-name.habit-done-settled {
-  opacity: 0.5;
-  transition: opacity 0.45s ease;
+  opacity: 0.55;
+  padding-top: 0;
+  padding-bottom: 0;
+  gap: 4px;
 }
 .habit-name.habit-done-settled .habit-name-text,
 .habit-name.habit-done-settled .habit-name-btn .habit-name-text {
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.1;
+  -webkit-line-clamp: 1;
   color: #94a3b8;
   text-decoration: line-through;
-  text-decoration-thickness: 2px;
+  text-decoration-thickness: 1px;
   text-decoration-color: #64748b;
+}
+.habit-name.habit-done-settled .streak-badge,
+.stat-cell.habit-done-settled .streak-badge {
+  width: 16px;
+  height: 16px;
+  font-size: 9px;
+}
+.stat-cell.habit-done-settled .stat-num,
+.stat-cell.habit-done-settled .stat-rate {
+  font-size: 10px;
 }
 
 .habit-cell.habit-done-settled,
 .stat-cell.habit-done-settled {
   position: relative;
-  filter: grayscale(0.55) brightness(1.08);
-  transition: filter 0.45s ease, opacity 0.45s ease;
+  filter: grayscale(0.55) brightness(1.06);
+}
+.habit-cell.habit-done-settled .cell-level-pips,
+.habit-cell.habit-done-settled .comment-dot {
+  transform: scale(0.7);
+  transform-origin: top right;
 }
 /* Frost the cell */
 .habit-cell.habit-done-settled::before,
@@ -630,12 +656,12 @@ body {
   content: '';
   position: absolute;
   inset: 0;
-  background: rgba(241, 245, 249, 0.62);
+  background: rgba(241, 245, 249, 0.55);
   z-index: 3;
   pointer-events: none;
-  transition: opacity 0.45s ease;
+  transition: opacity 0.4s ease;
 }
-/* Continuous thick strike through the whole date row */
+/* Thin continuous strike across the date strip */
 .habit-cell.habit-done-settled::after,
 .stat-cell.habit-done-settled::after {
   content: '';
@@ -643,21 +669,19 @@ body {
   left: -1px;
   right: -1px;
   top: 50%;
-  height: 5px;
-  margin-top: -2.5px;
+  height: 2px;
+  margin-top: -1px;
   background: #64748b;
-  box-shadow:
-    0 0 0 1px rgba(255, 255, 255, 0.55),
-    0 1px 2px rgba(15, 23, 42, 0.18);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.45);
   z-index: 4;
   pointer-events: none;
   transform: scaleX(1);
   transform-origin: left center;
-  animation: habit-strike-in 0.35s ease both;
+  animation: habit-strike-in 0.3s ease both;
 }
 .habit-cell.habit-done-settled.today-col::after {
-  height: 7px;
-  margin-top: -3.5px;
+  height: 2.5px;
+  margin-top: -1.25px;
   background: #475569;
 }
 @keyframes habit-strike-in {
@@ -670,14 +694,79 @@ body {
 .stat-cell.habit-done-settled:hover {
   filter: none;
   opacity: 1;
+  height: var(--row-h, 42px);
+}
+.habit-name.habit-done-settled:hover .habit-name-text,
+.habit-name.habit-done-settled:hover .habit-name-btn .habit-name-text {
+  font-size: 13px;
+  -webkit-line-clamp: 2;
+  text-decoration: none;
+  color: #1e293b;
 }
 .habit-cell.habit-done-settled:hover::before,
 .stat-cell.habit-done-settled:hover::before {
-  opacity: 0.2;
+  opacity: 0.15;
 }
 .habit-cell.habit-done-settled:hover::after,
 .stat-cell.habit-done-settled:hover::after {
-  opacity: 0.35;
+  opacity: 0.25;
+}
+
+/* Settings panel */
+.settings-panel { max-width: 440px; }
+.settings-block {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.settings-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #64748b;
+}
+.settings-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.settings-choice {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 12px 14px;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #f8fafc;
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s;
+}
+.settings-choice:hover { border-color: #cbd5e1; background: #fff; }
+.settings-choice.is-on {
+  border-color: #93c5fd;
+  background: #eff6ff;
+}
+.settings-choice input {
+  margin-top: 3px;
+  accent-color: #2563eb;
+  flex-shrink: 0;
+}
+.settings-choice-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.settings-choice-title {
+  font-size: 13.5px;
+  font-weight: 650;
+  color: #0f172a;
+}
+.settings-choice-desc {
+  font-size: 12px;
+  line-height: 1.4;
+  color: #64748b;
 }
 
 /* ─── Drag-and-drop reordering (edit mode) ───────────────────────────────── */

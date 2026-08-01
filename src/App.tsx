@@ -86,8 +86,38 @@ const STORAGE_KEY    = 'everyday-habits-v2';
 const SPENT_KEY      = 'everyday-spent-v1';
 const LAST_SPEND_KEY = 'everyday-last-spend-v1';
 const TEMPLATE_OVERRIDE_KEY = 'everyday-template-override-v1';
+const SETTINGS_KEY   = 'everyday-settings-v1';
 const WEEKDAY_LABELS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
 const WEEKDAY_NAMES  = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+/** How handled (done/skip/fail) habits look on today's board. */
+type DoneDisplay = 'collapse' | 'hide';
+
+interface AppSettings {
+  doneDisplay: DoneDisplay;
+}
+
+const DEFAULT_SETTINGS: AppSettings = { doneDisplay: 'collapse' };
+
+function loadSettings(): AppSettings {
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    if (!raw) return { ...DEFAULT_SETTINGS };
+    const parsed = JSON.parse(raw) as Partial<AppSettings>;
+    const doneDisplay = parsed.doneDisplay === 'hide' ? 'hide' : 'collapse';
+    return { doneDisplay };
+  } catch {
+    return { ...DEFAULT_SETTINGS };
+  }
+}
+
+function saveSettings(s: AppSettings) {
+  try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)); } catch { /* noop */ }
+}
+
+function isHandledToday(h: Habit, ds: string): boolean {
+  return h.completions.includes(ds) || h.skips.includes(ds) || h.fails.includes(ds);
+}
 
 function loadSpent(): number {
   try {
@@ -1695,13 +1725,15 @@ interface RowProps {
   onDragOverRow:  (id: string) => void;
   onDropRow:      (srcId: string, targetId: string) => void;
   onDragEndRow:   () => void;
+  doneDisplay: DoneDisplay;
 }
 
 const HabitRow = memo(function HabitRow(
   { habit, dates, isCurrentDay, isDue, boardDisabled, canToggleBoardDisable,
     onToggle, onRightClick, onCommentHover, onCommentLeave, onToggleBoardDisable,
     editMode, isEditing, onOpenEdit, onOpenLevelPicker, analyticsView,
-    isDragging, isDragOver, onDragStartRow, onDragOverRow, onDropRow, onDragEndRow }: RowProps
+    isDragging, isDragOver, onDragStartRow, onDragOverRow, onDropRow, onDragEndRow,
+    doneDisplay }: RowProps
 ) {
   const nameRef = useRef<HTMLDivElement>(null);
   const settleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1771,6 +1803,9 @@ const HabitRow = memo(function HabitRow(
   const wkRate  = useMemo(() => rateFrom(habit.completions, startOfWeek()),  [habit.completions]);
   const moRate  = useMemo(() => rateFrom(habit.completions, startOfMonth()), [habit.completions]);
   const allRate = useMemo(() => allTimeRate(habit.completions),               [habit.completions]);
+
+  // Hide mode removes the row after the settle delay (collapse mode keeps a thin stripe).
+  if (settledDone && doneDisplay === 'hide') return null;
 
   return (
     <>
@@ -2116,6 +2151,74 @@ const MoneyMenu = memo(function MoneyMenu(
   );
 });
 
+// ─── SettingsPanel ────────────────────────────────────────────────────────────
+
+function SettingsPanel({
+  settings, onChange, onClose,
+}: {
+  settings: AppSettings;
+  onChange: (next: AppSettings) => void;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [onClose]);
+
+  return createPortal(
+    <div className="archive-overlay" onClick={onClose}>
+      <div className="archive-panel settings-panel" onClick={e => e.stopPropagation()}>
+        <div className="archive-panel-header">
+          <div className="archive-panel-title-group">
+            <SettingsIcon />
+            <span className="archive-panel-title">Settings</span>
+          </div>
+          <button className="archive-close-btn" onClick={onClose}>✕</button>
+        </div>
+        <p className="history-hint">
+          Tune how today’s board behaves once you’ve marked a habit (done, skip, or fail).
+        </p>
+
+        <div className="settings-block">
+          <span className="settings-label">Handled habits</span>
+          <div className="settings-choices" role="radiogroup" aria-label="Handled habits display">
+            <label className={`settings-choice${settings.doneDisplay === 'collapse' ? ' is-on' : ''}`}>
+              <input
+                type="radio"
+                name="doneDisplay"
+                checked={settings.doneDisplay === 'collapse'}
+                onChange={() => onChange({ ...settings, doneDisplay: 'collapse' })}
+              />
+              <span className="settings-choice-body">
+                <span className="settings-choice-title">Shrink &amp; cross out</span>
+                <span className="settings-choice-desc">
+                  After a moment, the row collapses into a thin struck-through stripe so leftovers stay obvious.
+                </span>
+              </span>
+            </label>
+            <label className={`settings-choice${settings.doneDisplay === 'hide' ? ' is-on' : ''}`}>
+              <input
+                type="radio"
+                name="doneDisplay"
+                checked={settings.doneDisplay === 'hide'}
+                onChange={() => onChange({ ...settings, doneDisplay: 'hide' })}
+              />
+              <span className="settings-choice-body">
+                <span className="settings-choice-title">Disappear</span>
+                <span className="settings-choice-desc">
+                  Handled habits vanish from today’s board. Use “show all” or edit mode to see them again.
+                </span>
+              </span>
+            </label>
+          </div>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
 // ─── App ──────────────────────────────────────────────────────────────────────
 
 export default function App() {
@@ -2127,6 +2230,8 @@ export default function App() {
   const [activeTemplateId, setActiveTemplateId] = useState<string | null>(initialBoard.activeTemplateId);
   const [templateOverrideDate, setTemplateOverrideDate] = useState<string | null>(loadTemplateOverrideDate);
   const [showTemplates,  setShowTemplates]  = useState(false);
+  const [settings,       setSettings]       = useState<AppSettings>(loadSettings);
+  const [showSettings,   setShowSettings]   = useState(false);
   const [offset,         setOffset]         = useState(0);
   /** null = closed; 'footer' / 'end' append among active; otherwise insert before that habit id. */
   const [addPlacement, setAddPlacement] = useState<null | 'footer' | 'end' | string>(null);
@@ -2143,6 +2248,8 @@ export default function App() {
   const [syncToast,   setSyncToast]   = useState<{ type: 'success'|'error'; msg: string } | null>(null);
   const [showMemory, setShowMemory] = useState(false);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => { saveSettings(settings); }, [settings]);
 
   const showToast = useCallback((type: 'success'|'error', msg: string) => {
     setSyncToast({ type, msg });
@@ -2678,13 +2785,21 @@ export default function App() {
   // Interleaved sections + habits in board order. Habits respect due-today filter
   // (schedule + board disables). Edit / show-all reveals disabled habits so they
   // can be toggled back on. Hidden sections are omitted outside edit mode.
+  // Hide-mode also drops handled-today habits from the live board.
   const boardRows = useMemo((): BoardRow[] => {
     const habitMap = new Map(habits.map(h => [h.id, h]));
     const secMap = new Map(sections.map(s => [s.id, s]));
     const showAll = editMode || showAllHabits;
+    const hideHandled = settings.doneDisplay === 'hide' && isCurrentDay && !showAll;
     const visibleIds = new Set(
       habits
-        .filter(h => !h.archived && (showAll || isDue(h, todayStr)))
+        .filter(h => {
+          if (h.archived) return false;
+          if (showAll) return true;
+          if (!isDue(h, todayStr)) return false;
+          if (hideHandled && isHandledToday(h, todayStr)) return false;
+          return true;
+        })
         .map(h => h.id),
     );
     const rows: BoardRow[] = [];
@@ -2712,7 +2827,7 @@ export default function App() {
       }
     }
     return rows;
-  }, [habits, sections, boardOrder, editMode, showAllHabits, todayStr, isDue, activeHiddenSections]);
+  }, [habits, sections, boardOrder, editMode, showAllHabits, todayStr, isDue, activeHiddenSections, settings.doneDisplay, isCurrentDay]);
   const shownHabitCount = boardRows.filter(r => r.kind === 'habit').length;
   const hiddenCount = visibleHabits.length - shownHabitCount;
   // Stable per-day seed so "start"/"victory" quotes vary day to day.
@@ -2831,6 +2946,13 @@ export default function App() {
                   title="Memory — browse past syncs"
                 >
                   <HistoryIcon />
+                </button>
+                <button
+                  className="data-btn"
+                  onClick={() => setShowSettings(true)}
+                  title="Settings"
+                >
+                  <SettingsIcon />
                 </button>
                 <MoneyMenu
                   earned={totalMoney}
@@ -2969,6 +3091,7 @@ export default function App() {
                       onDragOverRow={handleDragOver}
                       onDropRow={reorderBoardItem}
                       onDragEndRow={handleDragEnd}
+                      doneDisplay={settings.doneDisplay}
                     />
                   )}
                 </Fragment>
@@ -3081,6 +3204,15 @@ export default function App() {
       {/* ── Memory gallery (past cloud syncs) ── */}
       {showMemory && (
         <MemoryGallery onClose={() => setShowMemory(false)} />
+      )}
+
+      {/* ── Settings ── */}
+      {showSettings && (
+        <SettingsPanel
+          settings={settings}
+          onChange={setSettings}
+          onClose={() => setShowSettings(false)}
+        />
       )}
 
       {/* ── Comment Popover ── */}
@@ -3244,6 +3376,15 @@ function SyncIcon({ spinning }: { spinning: boolean }) {
       <polyline points="1 4 1 10 7 10"/>
       <polyline points="23 20 23 14 17 14"/>
       <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+    </svg>
+  );
+}
+
+function SettingsIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <circle cx="12" cy="12" r="3" />
+      <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
     </svg>
   );
 }
