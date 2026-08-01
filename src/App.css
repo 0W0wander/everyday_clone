@@ -601,6 +601,85 @@ body {
 }
 .habit-name.board-disabled { background: #f8fafc; }
 
+/* Todolist settle — heavy strike across the date strip (where eyes go) */
+.habit-name.habit-done-pending {
+  transition: background 0.25s ease;
+  background: #f0fdf4;
+}
+.habit-name.habit-done-settled {
+  opacity: 0.5;
+  transition: opacity 0.45s ease;
+}
+.habit-name.habit-done-settled .habit-name-text,
+.habit-name.habit-done-settled .habit-name-btn .habit-name-text {
+  color: #94a3b8;
+  text-decoration: line-through;
+  text-decoration-thickness: 2px;
+  text-decoration-color: #64748b;
+}
+
+.habit-cell.habit-done-settled,
+.stat-cell.habit-done-settled {
+  position: relative;
+  filter: grayscale(0.55) brightness(1.08);
+  transition: filter 0.45s ease, opacity 0.45s ease;
+}
+/* Frost the cell */
+.habit-cell.habit-done-settled::before,
+.stat-cell.habit-done-settled::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: rgba(241, 245, 249, 0.62);
+  z-index: 3;
+  pointer-events: none;
+  transition: opacity 0.45s ease;
+}
+/* Continuous thick strike through the whole date row */
+.habit-cell.habit-done-settled::after,
+.stat-cell.habit-done-settled::after {
+  content: '';
+  position: absolute;
+  left: -1px;
+  right: -1px;
+  top: 50%;
+  height: 5px;
+  margin-top: -2.5px;
+  background: #64748b;
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.55),
+    0 1px 2px rgba(15, 23, 42, 0.18);
+  z-index: 4;
+  pointer-events: none;
+  transform: scaleX(1);
+  transform-origin: left center;
+  animation: habit-strike-in 0.35s ease both;
+}
+.habit-cell.habit-done-settled.today-col::after {
+  height: 7px;
+  margin-top: -3.5px;
+  background: #475569;
+}
+@keyframes habit-strike-in {
+  from { transform: scaleX(0); opacity: 0.3; }
+  to   { transform: scaleX(1); opacity: 1; }
+}
+
+.habit-name.habit-done-settled:hover,
+.habit-cell.habit-done-settled:hover,
+.stat-cell.habit-done-settled:hover {
+  filter: none;
+  opacity: 1;
+}
+.habit-cell.habit-done-settled:hover::before,
+.stat-cell.habit-done-settled:hover::before {
+  opacity: 0.2;
+}
+.habit-cell.habit-done-settled:hover::after,
+.stat-cell.habit-done-settled:hover::after {
+  opacity: 0.35;
+}
+
 /* ─── Drag-and-drop reordering (edit mode) ───────────────────────────────── */
 .drag-grip {
   display: flex; align-items: center; flex-shrink: 0;

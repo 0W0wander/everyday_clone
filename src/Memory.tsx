@@ -8,19 +8,31 @@ import './Memory.css';
 
 interface MemoryProps {
   onClose: () => void;
-  onRestore: (sha: string) => Promise<void>;
 }
 
 type SortMode = 'newest' | 'oldest';
 
+interface HabitCard {
+  id: string;
+  name: string;
+  color: string;
+  /** Extra levels beyond base */
+  levelCount: number;
+  /** Display name of the active tier (base or a level) */
+  displayName: string;
+  streak: number;
+  longest: number;
+  ageDays: number;
+  recent: boolean[]; // last 14 days ending on commit day
+}
+
 interface FrameSummary {
-  habitCount: number;
-  activeCount: number;
-  completionDays: number;
-  commentCount: number;
-  strokes: { color: string; strength: number; name: string }[];
+  habits: HabitCard[];
   monthKey: string;
-  habitNames: string[];
+  leveledCount: number;
+  avgStreak: number;
+  maxStreak: number;
+  newbornCount: number; // age ≤ 14 days at snapshot
 }
 
 function habitsFromPayload(raw: unknown): Habit[] {
@@ -31,31 +43,99 @@ function habitsFromPayload(raw: unknown): Habit[] {
   return [];
 }
 
-function summarize(habits: Habit[], committedAt: string): FrameSummary {
-  const active = habits.filter(h => !h.archived);
-  const list = active.length ? active : habits;
-  const completionDays = list.reduce((s, h) => s + (h.completions?.length ?? 0), 0);
-  const commentCount = list.reduce((s, h) => s + Object.keys(h.comments ?? {}).length, 0);
+function daysBetween(a: string, b: string): number {
+  const ms = new Date(b + 'T12:00:00').getTime() - new Date(a + 'T12:00:00').getTime();
+  return Math.round(ms / 86400000);
+}
 
-  // Recent activity window relative to the commit date
-  const commitDay = committedAt.slice(0, 10);
-  const strokes = list.slice(0, 14).map(h => {
-    const recent = (h.completions ?? []).filter(d => d <= commitDay).slice(-21).length;
-    return {
-      color: h.color || '#94a3b8',
-      strength: Math.min(1, 0.18 + recent / 14),
-      name: h.name,
-    };
-  });
+function addDays(ds: string, n: number): string {
+  const d = new Date(ds + 'T12:00:00');
+  d.setDate(d.getDate() + n);
+  return d.toISOString().slice(0, 10);
+}
 
+/** Streak of completions ending on or before `asOf` (skips ignored for memory view). */
+function streakAt(completions: string[], asOf: string): number {
+  const set = new Set(completions.filter(d => d <= asOf));
+  if (!set.size) return 0;
+  let n = 0;
+  let cur = asOf;
+  // If asOf itself isn't done, start from yesterday (grace for "today")
+  if (!set.has(cur)) cur = addDays(cur, -1);
+  while (set.has(cur)) {
+    n++;
+    cur = addDays(cur, -1);
+  }
+  return n;
+}
+
+function longestStreak(completions: string[], asOf: string): number {
+  const days = [...new Set(completions.filter(d => d <= asOf))].sort();
+  if (!days.length) return 0;
+  let best = 1;
+  let run = 1;
+  for (let i = 1; i < days.length; i++) {
+    if (daysBetween(days[i - 1], days[i]) === 1) {
+      run++;
+      if (run > best) best = run;
+    } else {
+      run = 1;
+    }
+  }
+  return best;
+}
+
+function habitAgeDays(h: Habit, asOf: string): number {
+  const dates = [...(h.completions ?? []), ...(h.skips ?? []), ...(h.fails ?? [])]
+    .filter(d => d <= asOf)
+    .sort();
+  if (!dates.length) return 0;
+  return Math.max(0, daysBetween(dates[0], asOf));
+}
+
+function recentWindow(completions: string[], asOf: string, len = 14): boolean[] {
+  const set = new Set(completions);
+  const out: boolean[] = [];
+  for (let i = len - 1; i >= 0; i--) {
+    out.push(set.has(addDays(asOf, -i)));
+  }
+  return out;
+}
+
+function toCard(h: Habit, asOf: string): HabitCard {
+  const comps = h.completions ?? [];
+  const levels = h.levels ?? [];
+  const levelCount = levels.length;
+  const idx = Math.min(h.activeLevel ?? 0, levelCount);
+  const displayName = idx === 0 ? h.name : (levels[idx - 1]?.name || h.name);
   return {
-    habitCount: habits.length,
-    activeCount: list.length,
-    completionDays,
-    commentCount,
-    strokes,
+    id: h.id,
+    name: h.name,
+    color: h.color || '#94a3b8',
+    levelCount,
+    displayName,
+    streak: streakAt(comps, asOf),
+    longest: longestStreak(comps, asOf),
+    ageDays: habitAgeDays(h, asOf),
+    recent: recentWindow(comps, asOf, 14),
+  };
+}
+
+function summarize(habits: Habit[], committedAt: string): FrameSummary {
+  const asOf = committedAt.slice(0, 10);
+  const list = habits.filter(h => !h.archived);
+  const cards = (list.length ? list : habits).map(h => toCard(h, asOf));
+  const streaks = cards.map(c => c.streak);
+  const avgStreak = cards.length
+    ? Math.round(streaks.reduce((a, b) => a + b, 0) / cards.length)
+    : 0;
+  return {
+    habits: cards,
     monthKey: committedAt.slice(0, 7),
-    habitNames: list.map(h => h.name),
+    leveledCount: cards.filter(c => c.levelCount > 0).length,
+    avgStreak,
+    maxStreak: streaks.length ? Math.max(...streaks) : 0,
+    newbornCount: cards.filter(c => c.ageDays > 0 && c.ageDays <= 14).length,
   };
 }
 
@@ -88,15 +168,86 @@ function monthLabel(key: string): string {
   return new Date(y, m - 1, 1).toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
 }
 
-export function MemoryGallery({ onClose, onRestore }: MemoryProps) {
+/** Diff against an older snapshot to highlight evolution. */
+function evolution(
+  current: FrameSummary,
+  older: FrameSummary | null,
+): { born: HabitCard[]; evolved: HabitCard[]; steady: number } {
+  if (!older) return { born: current.habits, evolved: [], steady: 0 };
+  const oldMap = new Map(older.habits.map(h => [h.id, h]));
+  const born: HabitCard[] = [];
+  const evolved: HabitCard[] = [];
+  let steady = 0;
+  for (const h of current.habits) {
+    const prev = oldMap.get(h.id);
+    if (!prev) {
+      born.push(h);
+      continue;
+    }
+    const nameChanged = prev.name !== h.name || prev.displayName !== h.displayName;
+    const grew = h.levelCount > prev.levelCount || h.longest > prev.longest + 5;
+    if (nameChanged || grew) evolved.push(h);
+    else steady++;
+  }
+  return { born, evolved, steady };
+}
+
+function HabitRoster({
+  habits, compact, highlightIds,
+}: {
+  habits: HabitCard[];
+  compact?: boolean;
+  highlightIds?: Set<string>;
+}) {
+  const shown = compact ? habits.slice(0, 8) : habits;
+  return (
+    <ul className={`memory-roster${compact ? ' is-compact' : ''}`}>
+      {shown.map(h => (
+        <li
+          key={h.id}
+          className={`memory-roster-row${highlightIds?.has(h.id) ? ' is-new' : ''}`}
+        >
+          <span className="memory-roster-swatch" style={{ background: h.color }} />
+          <span className="memory-roster-name" title={h.name}>
+            {h.displayName}
+            {h.levelCount > 0 && !compact && (
+              <span className="memory-roster-tier"> · {h.levelCount + 1} tiers</span>
+            )}
+          </span>
+          {!compact && (
+            <span className="memory-roster-meta" title="Streak / best">
+              {h.streak || '—'}
+              <span className="memory-roster-sep">/</span>
+              {h.longest || '—'}
+            </span>
+          )}
+          {compact && (
+            <span className="memory-roster-dots" aria-hidden>
+              {h.recent.slice(-7).map((on, i) => (
+                <i
+                  key={i}
+                  className={on ? 'on' : ''}
+                  style={on ? { background: h.color } : undefined}
+                />
+              ))}
+            </span>
+          )}
+        </li>
+      ))}
+      {compact && habits.length > shown.length && (
+        <li className="memory-roster-more">+{habits.length - shown.length} more</li>
+      )}
+    </ul>
+  );
+}
+
+export function MemoryGallery({ onClose }: MemoryProps) {
   const [commits, setCommits] = useState<GistCommit[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [summaries, setSummaries] = useState<Record<string, FrameSummary | 'loading' | 'error'>>({});
   const [selected, setSelected] = useState<string | null>(null);
-  const [query, setQuery] = useState('');
   const [month, setMonth] = useState<string>('all');
-  const [sort, setSort] = useState<SortMode>('newest');
-  const [busy, setBusy] = useState(false);
+  const [sort, setSort] = useState<SortMode>('oldest');
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -143,7 +294,6 @@ export function MemoryGallery({ onClose, onRestore }: MemoryProps) {
     setSummaries(prev => ({ ...prev, [sha]: summarize(habits, committedAt) }));
   }, []);
 
-  // Prefetch visible frames (all listed commits, lazily)
   useEffect(() => {
     if (!commits) return;
     let i = 0;
@@ -167,62 +317,49 @@ export function MemoryGallery({ onClose, onRestore }: MemoryProps) {
 
   const frames = useMemo(() => {
     if (!commits) return [];
-    const q = query.trim().toLowerCase();
     let list = [...commits];
-    if (sort === 'oldest') list.reverse();
-    return list.filter(c => {
-      if (month !== 'all' && c.committed_at.slice(0, 7) !== month) return false;
-      if (!q) return true;
-      const sum = summaries[c.version];
-      if (!sum || sum === 'loading' || sum === 'error') {
-        // Keep loading frames visible until we know; hide errors that can't match
-        return sum !== 'error';
-      }
-      return sum.habitNames.some(n => n.toLowerCase().includes(q));
-    });
-  }, [commits, month, query, sort, summaries]);
+    if (sort === 'oldest') list = list.slice().reverse();
+    if (month !== 'all') list = list.filter(c => c.committed_at.slice(0, 7) === month);
+    return list;
+  }, [commits, month, sort]);
 
   const selectedCommit = commits?.find(c => c.version === selected) ?? null;
   const selectedSum = selected ? summaries[selected] : null;
 
-  const restore = async () => {
-    if (!selected) return;
-    if (!window.confirm('Replace your current board with this memory? Your current state will be overwritten and synced to the cloud.')) return;
-    setBusy(true);
-    try {
-      await onRestore(selected);
-      onClose();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
+  // Oldest loaded snapshot before the selected one (for evolution labels)
+  const olderSum = useMemo((): FrameSummary | null => {
+    if (!commits || !selected || !selectedSum || selectedSum === 'loading' || selectedSum === 'error') {
+      return null;
     }
-  };
+    // commits are newest-first from API
+    const idx = commits.findIndex(c => c.version === selected);
+    for (let i = idx + 1; i < commits.length; i++) {
+      const s = summaries[commits[i].version];
+      if (s && s !== 'loading' && s !== 'error') return s;
+    }
+    return null;
+  }, [commits, selected, selectedSum, summaries]);
+
+  const evo = selectedSum && selectedSum !== 'loading' && selectedSum !== 'error'
+    ? evolution(selectedSum, olderSum)
+    : null;
+  const highlightNew = new Set(evo?.born.map(h => h.id) ?? []);
 
   return createPortal(
     <div className="memory-overlay" onClick={onClose} role="presentation">
       <div className="memory-hall" onClick={e => e.stopPropagation()} role="dialog" aria-label="Memory gallery">
         <header className="memory-header">
           <div className="memory-title-block">
-            <p className="memory-eyebrow">Gallery of days</p>
+            <p className="memory-eyebrow">Habit evolution</p>
             <h2 className="memory-title">Memory</h2>
             <p className="memory-subtitle">
-              Framed snapshots from past cloud syncs — who you were on those days.
+              Snapshots of your board over time — baby habits growing up, new ones arriving.
             </p>
           </div>
           <button type="button" className="memory-close" onClick={onClose} aria-label="Close">✕</button>
         </header>
 
         <div className="memory-filters">
-          <label className="memory-filter">
-            <span>Find habit</span>
-            <input
-              value={query}
-              onChange={e => setQuery(e.target.value)}
-              placeholder="e.g. Duolingo"
-              className="memory-input"
-            />
-          </label>
           <label className="memory-filter">
             <span>Era</span>
             <select className="memory-select" value={month} onChange={e => setMonth(e.target.value)}>
@@ -235,8 +372,8 @@ export function MemoryGallery({ onClose, onRestore }: MemoryProps) {
           <label className="memory-filter">
             <span>Order</span>
             <select className="memory-select" value={sort} onChange={e => setSort(e.target.value as SortMode)}>
-              <option value="newest">Newest first</option>
               <option value="oldest">Oldest first</option>
+              <option value="newest">Newest first</option>
             </select>
           </label>
         </div>
@@ -248,8 +385,8 @@ export function MemoryGallery({ onClose, onRestore }: MemoryProps) {
         ) : frames.length === 0 ? (
           <p className="memory-empty">
             {commits.length === 0
-              ? 'No sync history yet. Sync a few times to hang paintings here.'
-              : 'No frames match these filters.'}
+              ? 'No sync history yet. Sync a few times to hang snapshots here.'
+              : 'No snapshots in this era.'}
           </p>
         ) : (
           <div className="memory-wall">
@@ -262,7 +399,7 @@ export function MemoryGallery({ onClose, onRestore }: MemoryProps) {
                   type="button"
                   className={`memory-frame${selected === c.version ? ' is-selected' : ''}${isHead ? ' is-head' : ''}`}
                   onClick={() => setSelected(c.version)}
-                  style={{ '--tilt': `${((i % 5) - 2) * 0.35}deg` } as CSSProperties}
+                  style={{ '--tilt': `${((i % 5) - 2) * 0.28}deg` } as CSSProperties}
                 >
                   <div className="memory-mat">
                     <div className="memory-painting">
@@ -271,19 +408,7 @@ export function MemoryGallery({ onClose, onRestore }: MemoryProps) {
                       ) : sum === 'error' ? (
                         <div className="memory-painting-loading">Faded</div>
                       ) : (
-                        sum.strokes.map((s, j) => (
-                          <span
-                            key={j}
-                            className="memory-stroke"
-                            title={s.name}
-                            style={{
-                              background: s.color,
-                              opacity: s.strength,
-                              width: `${42 + (j * 7) % 40}%`,
-                              marginLeft: `${(j * 11) % 28}%`,
-                            }}
-                          />
-                        ))
+                        <HabitRoster habits={sum.habits} compact />
                       )}
                     </div>
                   </div>
@@ -292,7 +417,7 @@ export function MemoryGallery({ onClose, onRestore }: MemoryProps) {
                     <span className="memory-plaque-meta">
                       {isHead ? 'Present day' : formatRelative(c.committed_at)}
                       {sum && sum !== 'loading' && sum !== 'error'
-                        ? ` · ${sum.activeCount} habits`
+                        ? ` · ${sum.habits.length} habits`
                         : ''}
                     </span>
                   </div>
@@ -309,18 +434,7 @@ export function MemoryGallery({ onClose, onRestore }: MemoryProps) {
                 <div className="memory-mat memory-mat-lg">
                   <div className="memory-painting memory-painting-lg">
                     {selectedSum && selectedSum !== 'loading' && selectedSum !== 'error' ? (
-                      selectedSum.strokes.map((s, j) => (
-                        <span
-                          key={j}
-                          className="memory-stroke memory-stroke-lg"
-                          style={{
-                            background: s.color,
-                            opacity: s.strength,
-                            width: `${50 + (j * 9) % 45}%`,
-                            marginLeft: `${(j * 13) % 22}%`,
-                          }}
-                        />
-                      ))
+                      <HabitRoster habits={selectedSum.habits} highlightIds={highlightNew} />
                     ) : (
                       <div className="memory-painting-loading">Developing…</div>
                     )}
@@ -328,40 +442,65 @@ export function MemoryGallery({ onClose, onRestore }: MemoryProps) {
                 </div>
               </div>
               <div className="memory-detail-copy">
-                <p className="memory-eyebrow">Exhibition label</p>
+                <p className="memory-eyebrow">Snapshot</p>
                 <h3 className="memory-detail-title">{formatPlaqueDate(selectedCommit.committed_at)}</h3>
                 <p className="memory-detail-rel">{formatRelative(selectedCommit.committed_at)}</p>
-                {selectedSum && selectedSum !== 'loading' && selectedSum !== 'error' && (
+                {selectedSum && selectedSum !== 'loading' && selectedSum !== 'error' && evo && (
                   <>
                     <dl className="memory-stats">
-                      <div><dt>Habits</dt><dd>{selectedSum.activeCount}</dd></div>
-                      <div><dt>Logged days</dt><dd>{selectedSum.completionDays}</dd></div>
-                      <div><dt>Notes</dt><dd>{selectedSum.commentCount}</dd></div>
+                      <div><dt>Habits</dt><dd>{selectedSum.habits.length}</dd></div>
+                      <div><dt>With levels</dt><dd>{selectedSum.leveledCount}</dd></div>
+                      <div><dt>Best streak</dt><dd>{selectedSum.maxStreak}</dd></div>
+                      <div><dt>Avg streak</dt><dd>{selectedSum.avgStreak}</dd></div>
+                      <div><dt>Newborns</dt><dd>{selectedSum.newbornCount}</dd></div>
+                      <div><dt>New here</dt><dd>{evo.born.length}</dd></div>
                     </dl>
-                    <ul className="memory-habit-list">
-                      {selectedSum.habitNames.slice(0, 18).map(n => (
-                        <li key={n}>{n}</li>
-                      ))}
-                      {selectedSum.habitNames.length > 18 && (
-                        <li className="memory-habit-more">
-                          +{selectedSum.habitNames.length - 18} more
-                        </li>
-                      )}
-                    </ul>
+
+                    {(evo.born.length > 0 || evo.evolved.length > 0) && (
+                      <div className="memory-evo">
+                        {evo.born.length > 0 && (
+                          <div className="memory-evo-block">
+                            <p className="memory-evo-label">Arrived</p>
+                            <ul className="memory-evo-list">
+                              {evo.born.map(h => (
+                                <li key={h.id}>
+                                  <span className="memory-roster-swatch" style={{ background: h.color }} />
+                                  {h.displayName}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                        {evo.evolved.length > 0 && (
+                          <div className="memory-evo-block">
+                            <p className="memory-evo-label">Evolved</p>
+                            <ul className="memory-evo-list">
+                              {evo.evolved.map(h => (
+                                <li key={h.id}>
+                                  <span className="memory-roster-swatch" style={{ background: h.color }} />
+                                  {h.displayName}
+                                  {h.levelCount > 0 && (
+                                    <span className="memory-roster-tier"> · {h.levelCount + 1} tiers</span>
+                                  )}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    <p className="memory-detail-hint">
+                      Streak column is current / best as of this snapshot.
+                      {olderSum
+                        ? ' Gold rows are habits that didn’t exist in the previous memory.'
+                        : ' This is the earliest loaded snapshot.'}
+                    </p>
                   </>
                 )}
                 <div className="memory-detail-actions">
                   <button type="button" className="memory-btn-ghost" onClick={() => setSelected(null)}>
                     Back to wall
-                  </button>
-                  <button
-                    type="button"
-                    className="memory-btn-restore"
-                    disabled={busy || commits?.[0]?.version === selected}
-                    onClick={() => void restore()}
-                    title={commits?.[0]?.version === selected ? 'This is already your current board' : 'Restore this memory'}
-                  >
-                    {busy ? 'Restoring…' : 'Restore this day'}
                   </button>
                 </div>
               </div>

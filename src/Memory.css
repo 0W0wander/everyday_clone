@@ -61,7 +61,7 @@
   font-size: 13px;
   color: #9a9184;
   margin: 8px 0 0;
-  max-width: 420px;
+  max-width: 460px;
   line-height: 1.45;
 }
 .memory-close {
@@ -101,10 +101,9 @@
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: #8a8072;
-  min-width: 140px;
-  flex: 1;
+  min-width: 160px;
+  flex: 0 1 200px;
 }
-.memory-input,
 .memory-select {
   font-family: 'DM Sans', sans-serif;
   font-size: 13px;
@@ -118,11 +117,7 @@
   padding: 8px 10px;
   outline: none;
 }
-.memory-input:focus,
-.memory-select:focus {
-  border-color: #c4a574;
-}
-.memory-input::placeholder { color: #5c564c; }
+.memory-select:focus { border-color: #c4a574; }
 .memory-select option { background: #1a1814; color: #f3e8d4; }
 
 .memory-error {
@@ -150,13 +145,12 @@
   min-height: 0;
   overflow-y: auto;
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
   gap: 28px 22px;
   padding: 8px 4px 24px;
   align-content: start;
 }
 
-/* Ornate frame */
 .memory-frame {
   appearance: none;
   background: none;
@@ -175,9 +169,7 @@
   filter: drop-shadow(0 16px 28px rgba(0, 0, 0, 0.55));
   z-index: 2;
 }
-.memory-frame.is-head .memory-plaque-meta {
-  color: #c4a574;
-}
+.memory-frame.is-head .memory-plaque-meta { color: #c4a574; }
 
 .memory-mat {
   background:
@@ -188,25 +180,22 @@
     inset 0 0 0 3px rgba(40, 28, 10, 0.55),
     0 0 0 1px rgba(0, 0, 0, 0.4);
 }
-.memory-mat-lg {
-  padding: 14px;
-}
+.memory-mat-lg { padding: 12px; }
 
 .memory-painting {
   background:
-    radial-gradient(ellipse at 40% 30%, #f4e8d0, #e4d2b0 55%, #d4c09a);
-  min-height: 132px;
-  padding: 14px 12px;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  gap: 7px;
-  box-shadow: inset 0 0 24px rgba(90, 70, 40, 0.18);
+    radial-gradient(ellipse at 40% 30%, #f7efe0, #ebe0c8 55%, #ddd0b4);
+  min-height: 168px;
+  max-height: 168px;
+  padding: 10px 10px 8px;
+  overflow: hidden;
+  box-shadow: inset 0 0 24px rgba(90, 70, 40, 0.14);
 }
 .memory-painting-lg {
-  min-height: 220px;
-  padding: 22px 18px;
-  gap: 10px;
+  min-height: 320px;
+  max-height: min(56vh, 420px);
+  padding: 12px;
+  overflow-y: auto;
 }
 .memory-painting-loading {
   font-family: 'Cormorant Garamond', Georgia, serif;
@@ -214,17 +203,88 @@
   font-size: 16px;
   color: #8a7355;
   text-align: center;
-  padding: 36px 8px;
+  padding: 48px 8px;
 }
-.memory-stroke {
-  display: block;
-  height: 7px;
-  border-radius: 2px;
-  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.15);
+
+/* Real habit roster inside the frame */
+.memory-roster {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
 }
-.memory-stroke-lg {
-  height: 11px;
+.memory-roster.is-compact { gap: 4px; }
+.memory-roster-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 3px 4px;
   border-radius: 3px;
+}
+.memory-roster-row.is-new {
+  background: rgba(180, 140, 60, 0.18);
+  outline: 1px solid rgba(180, 140, 60, 0.35);
+}
+.memory-roster-swatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.12);
+}
+.memory-roster-name {
+  flex: 1;
+  min-width: 0;
+  font-family: 'DM Sans', sans-serif;
+  font-size: 11px;
+  font-weight: 600;
+  color: #3a3228;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.memory-roster.is-compact .memory-roster-name { font-size: 10.5px; }
+.memory-roster-tier {
+  font-weight: 500;
+  color: #7a6a52;
+}
+.memory-roster-meta {
+  font-family: 'DM Sans', sans-serif;
+  font-size: 10px;
+  font-weight: 700;
+  color: #5a4e3c;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+.memory-roster-sep {
+  color: #b0a08c;
+  margin: 0 1px;
+  font-weight: 500;
+}
+.memory-roster-dots {
+  display: flex;
+  gap: 2px;
+  flex-shrink: 0;
+}
+.memory-roster-dots i {
+  width: 5px;
+  height: 5px;
+  border-radius: 1px;
+  background: rgba(90, 70, 40, 0.15);
+  display: block;
+}
+.memory-roster-dots i.on {
+  opacity: 0.95;
+}
+.memory-roster-more {
+  font-family: 'Cormorant Garamond', Georgia, serif;
+  font-style: italic;
+  font-size: 12px;
+  color: #8a7355;
+  padding: 2px 4px;
 }
 
 .memory-plaque {
@@ -261,9 +321,9 @@
 }
 .memory-detail {
   display: grid;
-  grid-template-columns: minmax(240px, 360px) minmax(240px, 1fr);
+  grid-template-columns: minmax(260px, 1.1fr) minmax(240px, 1fr);
   gap: 28px;
-  width: min(860px, 100%);
+  width: min(920px, 100%);
   background: #221e18;
   border: 1px solid rgba(196, 165, 116, 0.28);
   padding: 28px;
@@ -273,6 +333,7 @@
 }
 .memory-detail-frame {
   filter: drop-shadow(0 12px 24px rgba(0, 0, 0, 0.4));
+  min-width: 0;
 }
 .memory-detail-title {
   font-family: 'Cormorant Garamond', Georgia, serif;
@@ -291,7 +352,7 @@
 .memory-stats {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: 10px;
+  gap: 8px;
   margin: 18px 0 0;
 }
 .memory-stats div {
@@ -310,69 +371,72 @@
 }
 .memory-stats dd {
   font-family: 'Cormorant Garamond', Georgia, serif;
-  font-size: 26px;
+  font-size: 24px;
   font-weight: 600;
   color: #f3e8d4;
   margin: 2px 0 0;
 }
-.memory-habit-list {
+
+.memory-evo {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 18px;
+}
+.memory-evo-label {
+  font-family: 'DM Sans', sans-serif;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: #c4a574;
+  margin: 0 0 6px;
+}
+.memory-evo-list {
   list-style: none;
-  margin: 16px 0 0;
+  margin: 0;
   padding: 0;
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  max-height: 140px;
-  overflow-y: auto;
+  flex-direction: column;
+  gap: 5px;
 }
-.memory-habit-list li {
+.memory-evo-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   font-family: 'DM Sans', sans-serif;
-  font-size: 11px;
-  color: #d4c8b4;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(196, 165, 116, 0.18);
-  padding: 4px 8px;
-  border-radius: 2px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: #e8dcc6;
 }
-.memory-habit-more {
-  color: #8a8072 !important;
-  border-style: dashed !important;
+.memory-detail-hint {
+  font-family: 'DM Sans', sans-serif;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: #8a8072;
+  margin: 16px 0 0;
 }
+
 .memory-detail-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
   margin-top: 22px;
 }
-.memory-btn-ghost,
-.memory-btn-restore {
+.memory-btn-ghost {
   font-family: 'DM Sans', sans-serif;
   font-size: 13px;
   font-weight: 600;
   padding: 10px 16px;
   border-radius: 3px;
   cursor: pointer;
-  transition: background 0.12s, border-color 0.12s, opacity 0.12s;
-}
-.memory-btn-ghost {
   background: transparent;
   border: 1px solid rgba(196, 165, 116, 0.35);
   color: #c4a574;
+  transition: background 0.12s;
 }
 .memory-btn-ghost:hover {
   background: rgba(196, 165, 116, 0.1);
-}
-.memory-btn-restore {
-  background: #c4a574;
-  border: 1px solid #c4a574;
-  color: #1a1814;
-}
-.memory-btn-restore:hover:not(:disabled) {
-  background: #d4b888;
-}
-.memory-btn-restore:disabled {
-  opacity: 0.4;
-  cursor: default;
 }
 
 @media (max-width: 720px) {
@@ -382,7 +446,9 @@
     gap: 18px;
   }
   .memory-wall {
-    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
     gap: 20px 14px;
   }
+  .memory-painting { min-height: 140px; max-height: 140px; }
+  .memory-stats { grid-template-columns: repeat(2, 1fr); }
 }

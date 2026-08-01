@@ -7,7 +7,7 @@ import type {
   Habit, HabitColor, HabitLevel, HabitSchedule, BoardSection, BoardTemplate,
 } from './types';
 import {
-  fetchRemote, pushRemote, isSyncConfigured, fetchRevision,
+  fetchRemote, pushRemote, isSyncConfigured,
 } from './sync';
 import { getQuote } from './quotes';
 import { MemoryGallery } from './Memory';
@@ -1704,6 +1704,7 @@ const HabitRow = memo(function HabitRow(
     isDragging, isDragOver, onDragStartRow, onDragOverRow, onDropRow, onDragEndRow }: RowProps
 ) {
   const nameRef = useRef<HTMLDivElement>(null);
+  const settleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const comp  = useMemo(() => new Set(habit.completions), [habit.completions]);
   const skip  = useMemo(() => new Set(habit.skips),       [habit.skips]);
   const fail  = useMemo(() => new Set(habit.fails),       [habit.fails]);
@@ -1717,9 +1718,48 @@ const HabitRow = memo(function HabitRow(
   const acc  = getAccent(habit.color);
   const todayStr = fmt(todayNoon());
   const doneToday = comp.has(todayStr);
+  const skipToday = skip.has(todayStr);
+  const failToday = fail.has(todayStr);
   const doneTodayAtNormal = doneToday && dayLevelOf(habit, todayStr) >= activeLevelIdx;
+  // Done, skip, or fail — any mark means this habit is handled for today.
+  const handledToday = doneToday || skipToday || failToday;
   const todayDue = isDue(habit, todayStr);
   const urgeMax = lvlMax > 0 && lvlCur >= lvlMax && todayDue && !doneTodayAtNormal;
+  const prevHandledRef = useRef(handledToday);
+
+  // Todolist settle: after you mark a habit (done / skip / fail), it stays vivid
+  // briefly then gets a heavy strike across the date cells so leftovers pop.
+  const canSettle = isCurrentDay && !editMode && handledToday;
+  const [settledDone, setSettledDone] = useState(
+    () => isCurrentDay && !editMode && handledToday,
+  );
+  useEffect(() => {
+    if (settleTimer.current) {
+      clearTimeout(settleTimer.current);
+      settleTimer.current = null;
+    }
+    if (!isCurrentDay || editMode) {
+      setSettledDone(false);
+      prevHandledRef.current = handledToday;
+      return;
+    }
+    if (!handledToday) {
+      setSettledDone(false);
+      prevHandledRef.current = false;
+      return;
+    }
+    if (!prevHandledRef.current) {
+      // Rising edge — just marked for the day
+      setSettledDone(false);
+      settleTimer.current = setTimeout(() => setSettledDone(true), 2800);
+    } else {
+      setSettledDone(true);
+    }
+    prevHandledRef.current = true;
+    return () => {
+      if (settleTimer.current) clearTimeout(settleTimer.current);
+    };
+  }, [handledToday, isCurrentDay, editMode]);
 
   // Sidebar name is clickable (to pick level) only in non-edit mode with levels defined
   const nameClickable = hasLevels && !editMode && !boardDisabled;
@@ -1737,7 +1777,7 @@ const HabitRow = memo(function HabitRow(
       <div
         ref={nameRef}
         data-hid={habit.id}
-        className={`cell habit-name${isEditing ? ' editing' : ''}${editMode ? ' draggable' : ''}${isDragging ? ' dragging' : ''}${isDragOver ? ' drag-over' : ''}${boardDisabled ? ' board-disabled' : ''}`}
+        className={`cell habit-name${isEditing ? ' editing' : ''}${editMode ? ' draggable' : ''}${isDragging ? ' dragging' : ''}${isDragOver ? ' drag-over' : ''}${boardDisabled ? ' board-disabled' : ''}${settledDone ? ' habit-done-settled' : ''}${canSettle && !settledDone ? ' habit-done-pending' : ''}`}
         draggable={editMode}
         onDragStart={editMode ? e => {
           e.dataTransfer.effectAllowed = 'move';
@@ -1822,7 +1862,7 @@ const HabitRow = memo(function HabitRow(
         return (
           <div
             key={`${habit.id}-${i}`}
-            className={`cell habit-cell${isTd ? ' today-col' : ''}${faild ? ' failed-cell' : ''}${hasComment ? ' has-comment' : ''}${offDay ? ' off-day' : ''}`}
+            className={`cell habit-cell${isTd ? ' today-col' : ''}${faild ? ' failed-cell' : ''}${hasComment ? ' has-comment' : ''}${offDay ? ' off-day' : ''}${settledDone ? ' habit-done-settled' : ''}`}
             style={done ? { backgroundColor: bg } : faild ? { '--fail-color': acc } as React.CSSProperties : undefined}
             onClick={() => onToggle(habit.id, ds)}
             onContextMenu={e => {
@@ -1880,10 +1920,10 @@ const HabitRow = memo(function HabitRow(
       })}
 
       {analyticsView === 0 && <>
-        <div className="cell stat-cell" title="Current streak at your normal level">
+        <div className={`cell stat-cell${settledDone ? ' habit-done-settled' : ''}`} title="Current streak at your normal level">
           <span className="stat-num">{lvlCur || ''}</span>
         </div>
-        <div className="cell stat-cell" title="Best streak at your normal level">
+        <div className={`cell stat-cell${settledDone ? ' habit-done-settled' : ''}`} title="Best streak at your normal level">
           <span
             className={`stat-num${urgeMax ? ' streak-urge' : ''}`}
             style={urgeMax ? { color: acc, textDecorationColor: acc } : undefined}
@@ -1892,26 +1932,26 @@ const HabitRow = memo(function HabitRow(
             {lvlMax || ''}
           </span>
         </div>
-        <div className="cell stat-cell" title="General current streak (any level)">
+        <div className={`cell stat-cell${settledDone ? ' habit-done-settled' : ''}`} title="General current streak (any level)">
           {doneToday ? <span className="streak-badge" style={{ background: acc }}>{cur}</span>
                      : <span className="stat-num">{cur || ''}</span>}
         </div>
       </>}
 
       {analyticsView === 1 && <>
-        <div className="cell stat-cell"><span className="stat-num">{wkCnt}</span></div>
-        <div className="cell stat-cell"><span className="stat-num">{moCnt}</span></div>
-        <div className="cell stat-cell"><span className="stat-num">{allCnt}</span></div>
+        <div className={`cell stat-cell${settledDone ? ' habit-done-settled' : ''}`}><span className="stat-num">{wkCnt}</span></div>
+        <div className={`cell stat-cell${settledDone ? ' habit-done-settled' : ''}`}><span className="stat-num">{moCnt}</span></div>
+        <div className={`cell stat-cell${settledDone ? ' habit-done-settled' : ''}`}><span className="stat-num">{allCnt}</span></div>
       </>}
 
       {analyticsView === 2 && <>
-        <div className="cell stat-cell">
+        <div className={`cell stat-cell${settledDone ? ' habit-done-settled' : ''}`}>
           <span className="stat-rate" style={{ color: rateColor(wkRate, acc) }}>{wkRate}%</span>
         </div>
-        <div className="cell stat-cell">
+        <div className={`cell stat-cell${settledDone ? ' habit-done-settled' : ''}`}>
           <span className="stat-rate" style={{ color: rateColor(moRate, acc) }}>{moRate}%</span>
         </div>
-        <div className="cell stat-cell">
+        <div className={`cell stat-cell${settledDone ? ' habit-done-settled' : ''}`}>
           <span className="stat-rate" style={{ color: rateColor(allRate, acc) }}>{allRate}%</span>
         </div>
       </>}
@@ -2519,43 +2559,6 @@ export default function App() {
     showToast('success', 'Synced to cloud ✓');
   }, [showToast, buildPayload]);
 
-  const restoreCloudRevision = useCallback(async (sha: string) => {
-    setSyncStatus('syncing');
-    const result = await fetchRevision<unknown>(sha);
-    if (!result.ok) {
-      setSyncStatus('error');
-      showToast('error', `Could not load revision: ${result.error}`);
-      throw new Error(result.error);
-    }
-    const parsed = parseRemotePayload(result.data);
-    if (!parsed.board || parsed.board.habits.length === 0) {
-      setSyncStatus('error');
-      const msg = 'That revision has no habits to restore.';
-      showToast('error', msg);
-      throw new Error(msg);
-    }
-    applyBoard(parsed.board);
-    if (parsed.spent !== null) setSpent(parsed.spent);
-    if (parsed.lastSpend !== null) setLastSpend(parsed.lastSpend);
-    // Push restored state as the new HEAD so other devices pick it up
-    const pushResult = await pushRemote({
-      habits: parsed.board.habits,
-      sections: parsed.board.sections,
-      boardOrder: parsed.board.boardOrder,
-      templates: parsed.board.templates,
-      activeTemplateId: parsed.board.activeTemplateId,
-      spent: parsed.spent ?? spentRef.current,
-      lastSpend: parsed.lastSpend ?? lastSpendRef.current,
-    });
-    if (!pushResult.ok) {
-      setSyncStatus('error');
-      showToast('error', `Restored locally but push failed: ${pushResult.error}`);
-      return;
-    }
-    setSyncStatus('synced');
-    showToast('success', 'Restored previous cloud version ✓');
-  }, [showToast, applyBoard]);
-
   // Drag-and-drop reordering for habits and sections (edit mode)
   const handleDragStart = useCallback((id: string) => setDraggingId(id), []);
   const handleDragOver  = useCallback((id: string) => setDragOverId(id), []);
@@ -3077,10 +3080,7 @@ export default function App() {
 
       {/* ── Memory gallery (past cloud syncs) ── */}
       {showMemory && (
-        <MemoryGallery
-          onRestore={restoreCloudRevision}
-          onClose={() => setShowMemory(false)}
-        />
+        <MemoryGallery onClose={() => setShowMemory(false)} />
       )}
 
       {/* ── Comment Popover ── */}
