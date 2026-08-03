@@ -1727,6 +1727,8 @@ interface RowProps {
   onDropRow:      (srcId: string, targetId: string) => void;
   onDragEndRow:   () => void;
   doneDisplay: DoneDisplay;
+  /** Hide mode: report when this row has finished its settle delay and may leave the board. */
+  onHideSettled?: (id: string, hidden: boolean) => void;
 }
 
 const HabitRow = memo(function HabitRow(
@@ -1734,7 +1736,7 @@ const HabitRow = memo(function HabitRow(
     onToggle, onRightClick, onCommentHover, onCommentLeave, onToggleBoardDisable,
     editMode, isEditing, onOpenEdit, onOpenLevelPicker, analyticsView,
     isDragging, isDragOver, onDragStartRow, onDragOverRow, onDropRow, onDragEndRow,
-    doneDisplay }: RowProps
+    doneDisplay, onHideSettled }: RowProps
 ) {
   const nameRef = useRef<HTMLDivElement>(null);
   const settleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1804,6 +1806,12 @@ const HabitRow = memo(function HabitRow(
   const wkRate  = useMemo(() => rateFrom(habit.completions, startOfWeek()),  [habit.completions]);
   const moRate  = useMemo(() => rateFrom(habit.completions, startOfMonth()), [habit.completions]);
   const allRate = useMemo(() => allTimeRate(habit.completions),               [habit.completions]);
+
+  // Tell the board when hide-mode may drop this row (after settle — never instantly).
+  // No unmount cleanup: clearing here would re-insert the row and loop forever.
+  useEffect(() => {
+    onHideSettled?.(habit.id, doneDisplay === 'hide' && settledDone && canSettle);
+  }, [doneDisplay, settledDone, canSettle, habit.id, onHideSettled]);
 
   // Hide mode removes the row after the settle delay (collapse mode keeps a thin stripe).
   if (settledDone && doneDisplay === 'hide') return null;
@@ -2208,7 +2216,7 @@ function SettingsPanel({
               <span className="settings-choice-body">
                 <span className="settings-choice-title">Disappear</span>
                 <span className="settings-choice-desc">
-                  Handled habits vanish from today’s board. Use “show all” or edit mode to see them again.
+                  After a moment, handled habits vanish from today’s board. Use “show all” or edit mode to see them again.
                 </span>
               </span>
             </label>
@@ -2791,6 +2799,19 @@ export default function App() {
     if (!dayPerfect) wasPerfectRef.current = false;
   }, [dayPerfect]);
 
+  // Habit IDs that finished the settle delay in hide mode (safe to drop from the board).
+  const [hideSettledIds, setHideSettledIds] = useState<Set<string>>(() => new Set());
+  const onHideSettled = useCallback((id: string, hidden: boolean) => {
+    setHideSettledIds(prev => {
+      const has = prev.has(id);
+      if (hidden === has) return prev;
+      const next = new Set(prev);
+      if (hidden) next.add(id); else next.delete(id);
+      return next;
+    });
+  }, []);
+  useEffect(() => { setHideSettledIds(new Set()); }, [todayStr]);
+
   type BoardRow =
     | { kind: 'section'; section: BoardSection }
     | { kind: 'habit'; habit: Habit };
@@ -2798,19 +2819,19 @@ export default function App() {
   // Interleaved sections + habits in board order. Habits respect due-today filter
   // (schedule + board disables). Edit / show-all reveals disabled habits so they
   // can be toggled back on. Hidden sections are omitted outside edit mode.
-  // Hide-mode also drops handled-today habits from the live board.
+  // Hide-mode drops a habit only after its settle delay (same timing as collapse).
   const boardRows = useMemo((): BoardRow[] => {
     const habitMap = new Map(habits.map(h => [h.id, h]));
     const secMap = new Map(sections.map(s => [s.id, s]));
     const showAll = editMode || showAllHabits;
-    const hideHandled = settings.doneDisplay === 'hide' && isCurrentDay && !showAll;
+    const hideSettled = settings.doneDisplay === 'hide' && isCurrentDay && !showAll;
     const visibleIds = new Set(
       habits
         .filter(h => {
           if (h.archived) return false;
           if (showAll) return true;
           if (!isDue(h, todayStr)) return false;
-          if (hideHandled && isHandledToday(h, todayStr)) return false;
+          if (hideSettled && hideSettledIds.has(h.id) && isHandledToday(h, todayStr)) return false;
           return true;
         })
         .map(h => h.id),
@@ -2840,7 +2861,7 @@ export default function App() {
       }
     }
     return rows;
-  }, [habits, sections, boardOrder, editMode, showAllHabits, todayStr, isDue, activeHiddenSections, settings.doneDisplay, isCurrentDay]);
+  }, [habits, sections, boardOrder, editMode, showAllHabits, todayStr, isDue, activeHiddenSections, settings.doneDisplay, isCurrentDay, hideSettledIds]);
   const shownHabitCount = boardRows.filter(r => r.kind === 'habit').length;
   const hiddenCount = visibleHabits.length - shownHabitCount;
   // Stable per-day seed so "start"/"victory" quotes vary day to day.
@@ -3109,6 +3130,7 @@ export default function App() {
                       onDropRow={reorderBoardItem}
                       onDragEndRow={handleDragEnd}
                       doneDisplay={settings.doneDisplay}
+                      onHideSettled={onHideSettled}
                     />
                   )}
                 </Fragment>

@@ -112,69 +112,75 @@
   to   { transform: translateX(0); }
 }
 
-/* Center banner */
+/* Center banner — weathered war quote */
 .victory-banner {
   position: relative;
   text-align: center;
-  padding: 28px 48px;
-  transform: scale(0.4) rotate(-6deg);
-  animation: victory-banner-slam 0.7s cubic-bezier(0.34, 1.56, 0.64, 1) 0.1s both,
-             victory-banner-bob 1.2s ease-in-out 0.9s 3;
-  filter: drop-shadow(0 20px 40px rgba(0, 0, 0, 0.35));
+  max-width: min(920px, 92vw);
+  padding: 32px 40px;
+  transform: scale(0.4) rotate(-2deg);
+  animation: victory-banner-slam 0.75s cubic-bezier(0.34, 1.4, 0.64, 1) 0.1s both,
+             victory-banner-bob 1.4s ease-in-out 0.95s 3;
+  filter: drop-shadow(0 18px 36px rgba(0, 0, 0, 0.45));
 }
 .victory-banner-glow {
   position: absolute;
-  inset: -40%;
-  background: radial-gradient(circle, rgba(250, 204, 21, 0.55), transparent 65%);
+  inset: -30%;
+  background: radial-gradient(circle, rgba(250, 204, 21, 0.4), transparent 65%);
   animation: victory-glow-pulse 0.8s ease-in-out infinite alternate;
   z-index: -1;
 }
 @keyframes victory-glow-pulse {
-  from { opacity: 0.5; transform: scale(0.9); }
-  to   { opacity: 1; transform: scale(1.15); }
+  from { opacity: 0.45; transform: scale(0.9); }
+  to   { opacity: 1; transform: scale(1.12); }
 }
 @keyframes victory-banner-slam {
-  0%   { transform: scale(2.4) rotate(12deg); opacity: 0; }
-  60%  { transform: scale(0.92) rotate(-4deg); opacity: 1; }
-  100% { transform: scale(1) rotate(-2deg); opacity: 1; }
+  0%   { transform: scale(1.8) rotate(4deg); opacity: 0; }
+  60%  { transform: scale(0.96) rotate(-1.5deg); opacity: 1; }
+  100% { transform: scale(1) rotate(-1deg); opacity: 1; }
 }
 @keyframes victory-banner-bob {
-  0%, 100% { transform: scale(1) rotate(-2deg) translateY(0); }
-  50% { transform: scale(1.04) rotate(2deg) translateY(-8px); }
+  0%, 100% { transform: scale(1) rotate(-1deg) translateY(0); }
+  50% { transform: scale(1.02) rotate(0.5deg) translateY(-6px); }
 }
 
 .victory-banner-text {
   display: block;
-  font-family: 'Segoe UI', system-ui, sans-serif;
-  font-size: clamp(42px, 9vw, 96px);
-  font-weight: 900;
-  letter-spacing: -0.03em;
-  line-height: 0.95;
-  background: linear-gradient(110deg, #facc15 0%, #fff 25%, #4ade80 50%, #38bdf8 75%, #f472b6 100%);
-  background-size: 200% 100%;
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-  animation: victory-text-shine 1.8s linear infinite;
-  text-transform: uppercase;
+  font-family: 'Palatino Linotype', Palatino, 'Book Antiqua', Georgia, serif;
+  font-size: clamp(22px, 4.2vw, 44px);
+  font-weight: 700;
+  font-style: italic;
+  letter-spacing: 0.01em;
+  line-height: 1.2;
+  color: #fffbeb;
+  text-shadow:
+    0 1px 0 #78350f,
+    0 2px 0 #92400e,
+    0 3px 0 rgba(0, 0, 0, 0.35),
+    0 0 28px rgba(250, 204, 21, 0.45),
+    0 0 60px rgba(0, 0, 0, 0.5);
+  animation: victory-text-flare 2.2s ease-in-out infinite alternate;
 }
-@keyframes victory-text-shine {
-  to { background-position: 200% 0; }
+@keyframes victory-text-flare {
+  from { filter: brightness(1); }
+  to   { filter: brightness(1.12); }
 }
 .victory-banner-sub {
   display: block;
-  margin-top: 10px;
-  font-size: clamp(14px, 2.5vw, 20px);
+  margin-top: 16px;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  font-size: clamp(12px, 1.8vw, 16px);
   font-weight: 700;
-  letter-spacing: 0.28em;
+  font-style: normal;
+  letter-spacing: 0.22em;
   text-transform: uppercase;
-  color: #14532d;
-  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.7);
-  animation: victory-sub-in 0.5s ease 0.45s both;
+  color: #fef3c7;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.55);
+  animation: victory-sub-in 0.55s ease 0.5s both;
 }
 @keyframes victory-sub-in {
-  from { opacity: 0; letter-spacing: 0.6em; }
-  to   { opacity: 1; letter-spacing: 0.28em; }
+  from { opacity: 0; letter-spacing: 0.5em; transform: translateY(6px); }
+  to   { opacity: 1; letter-spacing: 0.22em; transform: translateY(0); }
 }
 
 /* Orbiting stickers */

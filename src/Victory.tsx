@@ -30,13 +30,43 @@ const COLORS = [
   '#fde68a', '#86efac',
 ];
 
-const BANNERS = [
-  'PERFECT DAY',
-  'ALL CLEAR',
-  'STREAK FUEL',
-  'UNSTOPPABLE',
-  'CLEAN SWEEP',
-  'LEGENDARY',
+const QUOTES: { text: string; by: string }[] = [
+  { text: 'I came, I saw, I conquered.', by: 'Julius Caesar' },
+  { text: 'The die is cast.', by: 'Julius Caesar' },
+  { text: 'Come back with your shield — or on it.', by: 'Spartan mothers' },
+  { text: 'Come and take them.', by: 'Leonidas of Sparta' },
+  { text: 'I will either find a way, or make one.', by: 'Hannibal' },
+  { text: 'Fortune favors the bold.', by: 'Virgil' },
+  { text: 'If you want peace, prepare for war.', by: 'Vegetius' },
+  { text: 'In the midst of chaos, there is also opportunity.', by: 'Sun Tzu' },
+  { text: 'Know the enemy and know yourself; in a hundred battles, you will never be defeated.', by: 'Sun Tzu' },
+  { text: 'He who is prudent and lies in wait for an enemy who is not, will be victorious.', by: 'Sun Tzu' },
+  { text: 'Victory belongs to the most persevering.', by: 'Napoleon Bonaparte' },
+  { text: 'Never interrupt your enemy when he is making a mistake.', by: 'Napoleon Bonaparte' },
+  { text: 'I have not yet begun to fight!', by: 'John Paul Jones' },
+  { text: 'Damn the torpedoes — full speed ahead!', by: 'David Farragut' },
+  { text: 'Don’t fire until you see the whites of their eyes.', by: 'William Prescott' },
+  { text: 'Nuts.', by: 'Anthony McAuliffe' },
+  { text: 'We shall fight on the beaches… we shall never surrender.', by: 'Winston Churchill' },
+  { text: 'I have nothing to offer but blood, toil, tears and sweat.', by: 'Winston Churchill' },
+  { text: 'These are the times that try men’s souls.', by: 'Thomas Paine' },
+  { text: 'The harder the conflict, the more glorious the triumph.', by: 'Thomas Paine' },
+  { text: 'Give me liberty, or give me death!', by: 'Patrick Henry' },
+  { text: 'Once more unto the breach, dear friends, once more.', by: 'William Shakespeare' },
+  { text: 'We few, we happy few, we band of brothers.', by: 'William Shakespeare' },
+  { text: 'Cry “Havoc!” and let slip the dogs of war.', by: 'William Shakespeare' },
+  { text: 'Cowards die many times before their deaths; the valiant never taste of death but once.', by: 'William Shakespeare' },
+  { text: 'War is cruelty. There is no use trying to reform it.', by: 'William Tecumseh Sherman' },
+  { text: 'It is well that war is so terrible, or we should grow too fond of it.', by: 'Robert E. Lee' },
+  { text: 'The art of war is of vital importance to the State.', by: 'Sun Tzu' },
+  { text: 'A good general not only sees the way to victory; he knows when victory is impossible.', by: 'Polybius' },
+  { text: 'Let them hate, so long as they fear.', by: 'Caligula' },
+  { text: 'Death is lighter than a feather; duty, heavier than a mountain.', by: 'Yamamoto Tsunetomo' },
+  { text: 'Even the finest sword plunged into salt water will eventually rust.', by: 'Sun Tzu' },
+  { text: 'Who dares, wins.', by: 'British SAS' },
+  { text: 'Through adversity, to the stars.', by: 'Royal Air Force' },
+  { text: 'They shall not pass.', by: 'Robert Nivelle' },
+  { text: 'I am the master of my fate: I am the captain of my soul.', by: 'William Ernest Henley' },
 ];
 
 function pick<T>(arr: T[]): T {
@@ -45,7 +75,7 @@ function pick<T>(arr: T[]): T {
 
 export function VictoryCelebration({ active }: VictoryProps) {
   const [show, setShow] = useState(false);
-  const [banner, setBanner] = useState(BANNERS[0]);
+  const [quote, setQuote] = useState(QUOTES[0]);
   const [burstKey, setBurstKey] = useState(0);
   const prev = useRef(false);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -57,7 +87,7 @@ export function VictoryCelebration({ active }: VictoryProps) {
   // Rising edge → launch the circus
   useEffect(() => {
     if (active && !prev.current) {
-      setBanner(pick(BANNERS));
+      setQuote(pick(QUOTES));
       setBurstKey(k => k + 1);
       setShow(true);
       endAt.current = performance.now() + 7800;
@@ -259,8 +289,8 @@ export function VictoryCelebration({ active }: VictoryProps) {
             <div className="victory-ribbon victory-ribbon-r" />
             <div className="victory-banner">
               <span className="victory-banner-glow" />
-              <span className="victory-banner-text">{banner}</span>
-              <span className="victory-banner-sub">Every habit. Done.</span>
+              <span className="victory-banner-text">“{quote.text}”</span>
+              <span className="victory-banner-sub">— {quote.by}</span>
             </div>
             <div className="victory-stickers">
               {([0, 1, 2, 3, 4, 5, 6, 7] as const).map(i => (
