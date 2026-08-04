@@ -445,6 +445,50 @@ body {
   margin-top: -1px;
 }
 
+/* Insert submenu: Habit / Section */
+.insert-menu {
+  position: absolute;
+  z-index: 13000;
+  min-width: 132px;
+  padding: 4px;
+  border-radius: 8px;
+  border: 1px solid #dbeafe;
+  background: #fff;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12), 0 2px 6px rgba(15, 23, 42, 0.06);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.insert-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border: none;
+  background: transparent;
+  border-radius: 6px;
+  padding: 7px 10px;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  color: #0f172a;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.1s, color 0.1s;
+}
+.insert-menu-item:hover {
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+.insert-menu-ico {
+  width: 16px;
+  text-align: center;
+  color: #2563eb;
+  font-weight: 700;
+  font-size: 14px;
+  line-height: 1;
+}
+
 /* ─── Section divider row (independent board item) ───────────────────────── */
 .section-divider {
   grid-column: 1 / -1;

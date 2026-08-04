@@ -1524,6 +1524,51 @@ function LevelPicker({ habit, onPick, onClose }: LevelPickerProps) {
   );
 }
 
+// ─── InsertMenu — choose habit vs section at a board insert point ────────────
+
+function InsertMenu({ anchorRef, onPickHabit, onPickSection, onClose }: {
+  anchorRef: React.RefObject<HTMLButtonElement | null>;
+  onPickHabit: () => void;
+  onPickSection: () => void;
+  onClose: () => void;
+}) {
+  const panelRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (panelRef.current && !panelRef.current.contains(t) && !anchorRef.current?.contains(t)) onClose();
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    const id = setTimeout(() => document.addEventListener('mousedown', handler), 80);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      clearTimeout(id);
+      document.removeEventListener('mousedown', handler);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [onClose, anchorRef]);
+
+  const pos = useAnchoredPosition(() => anchorRef.current?.getBoundingClientRect() ?? null, panelRef, true);
+
+  return createPortal(
+    <div
+      ref={panelRef}
+      className="insert-menu"
+      style={{ top: pos?.top ?? 0, left: pos?.left ?? 0, visibility: pos ? 'visible' : 'hidden' }}
+      role="menu"
+    >
+      <button type="button" role="menuitem" className="insert-menu-item" onClick={onPickHabit}>
+        <span className="insert-menu-ico">+</span> Habit
+      </button>
+      <button type="button" role="menuitem" className="insert-menu-item" onClick={onPickSection}>
+        <span className="insert-menu-ico">§</span> Section
+      </button>
+    </div>,
+    document.body,
+  );
+}
+
 // ─── AddPanel — new-habit popover (portal, never clipped) ────────────────────
 
 function AddPanel({ anchorRef, onAdd, onClose }: {
@@ -2242,8 +2287,10 @@ export default function App() {
   const [settings,       setSettings]       = useState<AppSettings>(loadSettings);
   const [showSettings,   setShowSettings]   = useState(false);
   const [offset,         setOffset]         = useState(0);
-  /** null = closed; 'footer' / 'end' append among active; otherwise insert before that habit id. */
+  /** null = closed; 'footer' / 'end' append among active; otherwise insert before that board id. */
   const [addPlacement, setAddPlacement] = useState<null | 'footer' | 'end' | string>(null);
+  /** Insert-point submenu (habit vs section) — same placement ids as addPlacement. */
+  const [insertMenu, setInsertMenu] = useState<null | 'end' | string>(null);
   const [spent,          setSpent]          = useState<number>(loadSpent);
   const [lastSpend,      setLastSpend]      = useState<number>(loadLastSpend);
   const [editMode,       setEditMode]       = useState(false);
@@ -2269,6 +2316,7 @@ export default function App() {
   const [commentTooltip, setCommentTooltip] = useState<{ text: string; ds: string; rect: DOMRect } | null>(null);
   const addBtnRef     = useRef<HTMLButtonElement>(null);
   const addAnchorRef  = useRef<HTMLButtonElement | null>(null);
+  const insertAnchorRef = useRef<HTMLButtonElement | null>(null);
   const fileInputRef  = useRef<HTMLInputElement>(null);
   const syncTimer    = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isFirstLoad  = useRef(true);
@@ -2552,15 +2600,32 @@ export default function App() {
     addAnchorRef.current = null;
   }, []);
 
+  const closeInsertMenu = useCallback(() => {
+    setInsertMenu(null);
+    insertAnchorRef.current = null;
+  }, []);
+
   const openAdd = useCallback((
     placement: 'footer' | 'end' | string,
     anchor: HTMLButtonElement | null,
   ) => {
     if (addPlacement === placement) { closeAdd(); return; }
+    closeInsertMenu();
     addAnchorRef.current = anchor;
     setEditingId(null);
     setAddPlacement(placement);
-  }, [addPlacement, closeAdd]);
+  }, [addPlacement, closeAdd, closeInsertMenu]);
+
+  const openInsertMenu = useCallback((
+    placement: 'end' | string,
+    anchor: HTMLButtonElement | null,
+  ) => {
+    if (insertMenu === placement) { closeInsertMenu(); return; }
+    closeAdd();
+    insertAnchorRef.current = anchor;
+    setEditingId(null);
+    setInsertMenu(placement);
+  }, [insertMenu, closeInsertMenu, closeAdd]);
 
   const addHabit = useCallback((name: string, color: string) => {
     const n = name.trim();
@@ -2588,12 +2653,31 @@ export default function App() {
     closeAdd();
   }, [addPlacement, closeAdd]);
 
-  const addSection = useCallback(() => {
+  const addSection = useCallback((beforeId?: string | null) => {
     const id = `sec-${Date.now()}`;
     const label = 'New section';
     setSections(prev => [...prev, { id, label }]);
-    setBoardOrder(prev => [...prev, id]);
-  }, []);
+    setBoardOrder(prev => {
+      if (beforeId && beforeId !== 'end' && beforeId !== 'footer') {
+        const idx = prev.indexOf(beforeId);
+        if (idx >= 0) {
+          const next = [...prev];
+          next.splice(idx, 0, id);
+          return next;
+        }
+      }
+      return [...prev, id];
+    });
+    closeInsertMenu();
+  }, [closeInsertMenu]);
+
+  const pickInsertHabit = useCallback(() => {
+    const placement = insertMenu;
+    const anchor = insertAnchorRef.current;
+    if (!placement) return;
+    closeInsertMenu();
+    openAdd(placement, anchor);
+  }, [insertMenu, closeInsertMenu, openAdd]);
 
   const renameSection = useCallback((id: string, label: string) => {
     setSections(prev => prev.map(s => s.id === id ? { ...s, label } : s));
@@ -3081,9 +3165,9 @@ export default function App() {
                     <div className="habit-insert-row">
                       <button
                         type="button"
-                        className={`habit-insert-btn${addPlacement === rowId ? ' active' : ''}`}
-                        title="Add habit here"
-                        onClick={e => openAdd(rowId, e.currentTarget)}
+                        className={`habit-insert-btn${insertMenu === rowId || addPlacement === rowId ? ' active' : ''}`}
+                        title="Add habit or section here"
+                        onClick={e => openInsertMenu(rowId, e.currentTarget)}
                       >
                         <span className="habit-insert-plus">+</span>
                       </button>
@@ -3141,9 +3225,9 @@ export default function App() {
               <div className="habit-insert-row">
                 <button
                   type="button"
-                  className={`habit-insert-btn${addPlacement === 'end' ? ' active' : ''}`}
-                  title="Add habit here"
-                  onClick={e => openAdd('end', e.currentTarget)}
+                  className={`habit-insert-btn${insertMenu === 'end' || addPlacement === 'end' ? ' active' : ''}`}
+                  title="Add habit or section here"
+                  onClick={e => openInsertMenu('end', e.currentTarget)}
                 >
                   <span className="habit-insert-plus">+</span>
                 </button>
@@ -3162,7 +3246,7 @@ export default function App() {
                 </button>
                 {editMode && (
                   <>
-                    <button className="add-section-btn" onClick={addSection} title="Add a section header">
+                    <button className="add-section-btn" onClick={() => addSection()} title="Add a section header">
                       § Section
                     </button>
                     <button
@@ -3200,6 +3284,16 @@ export default function App() {
           </div>
         </div>
       </div>
+
+      {/* ── Insert menu (habit vs section at a board gap) ── */}
+      {insertMenu !== null && (
+        <InsertMenu
+          anchorRef={insertAnchorRef}
+          onPickHabit={pickInsertHabit}
+          onPickSection={() => addSection(insertMenu === 'end' ? null : insertMenu)}
+          onClose={closeInsertMenu}
+        />
+      )}
 
       {/* ── Add Habit Panel (portal, never clipped by overflow) ── */}
       {addPlacement !== null && (
