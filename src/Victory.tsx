@@ -2,9 +2,13 @@ import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 import './Victory.css';
 
+export type VictoryTone = 'better' | 'worse' | 'same';
+
 interface VictoryProps {
-  /** True while every due habit for today is completed. */
+  /** True while every due habit for today is marked (done / skip / fail). */
   active: boolean;
+  /** Today vs yesterday — drives quote pool + caption. */
+  tone?: VictoryTone;
 }
 
 interface Particle {
@@ -30,52 +34,79 @@ const COLORS = [
   '#fde68a', '#86efac',
 ];
 
-const QUOTES: { text: string; by: string }[] = [
+const COLORS_WORSE = [
+  '#f87171', '#fb923c', '#a8a29e', '#78716c', '#fbbf24',
+  '#e11d48', '#ffffff', '#fca5a5', '#fdba74',
+];
+
+type Quote = { text: string; by: string };
+
+const QUOTES_BETTER: Quote[] = [
   { text: 'I came, I saw, I conquered.', by: 'Julius Caesar' },
-  { text: 'The die is cast.', by: 'Julius Caesar' },
-  { text: 'Come back with your shield — or on it.', by: 'Spartan mothers' },
   { text: 'Come and take them.', by: 'Leonidas of Sparta' },
   { text: 'I will either find a way, or make one.', by: 'Hannibal' },
   { text: 'Fortune favors the bold.', by: 'Virgil' },
-  { text: 'If you want peace, prepare for war.', by: 'Vegetius' },
-  { text: 'In the midst of chaos, there is also opportunity.', by: 'Sun Tzu' },
-  { text: 'Know the enemy and know yourself; in a hundred battles, you will never be defeated.', by: 'Sun Tzu' },
-  { text: 'He who is prudent and lies in wait for an enemy who is not, will be victorious.', by: 'Sun Tzu' },
   { text: 'Victory belongs to the most persevering.', by: 'Napoleon Bonaparte' },
-  { text: 'Never interrupt your enemy when he is making a mistake.', by: 'Napoleon Bonaparte' },
   { text: 'I have not yet begun to fight!', by: 'John Paul Jones' },
   { text: 'Damn the torpedoes — full speed ahead!', by: 'David Farragut' },
-  { text: 'Don’t fire until you see the whites of their eyes.', by: 'William Prescott' },
-  { text: 'Nuts.', by: 'Anthony McAuliffe' },
-  { text: 'We shall fight on the beaches… we shall never surrender.', by: 'Winston Churchill' },
-  { text: 'I have nothing to offer but blood, toil, tears and sweat.', by: 'Winston Churchill' },
-  { text: 'These are the times that try men’s souls.', by: 'Thomas Paine' },
-  { text: 'The harder the conflict, the more glorious the triumph.', by: 'Thomas Paine' },
-  { text: 'Give me liberty, or give me death!', by: 'Patrick Henry' },
-  { text: 'Once more unto the breach, dear friends, once more.', by: 'William Shakespeare' },
-  { text: 'We few, we happy few, we band of brothers.', by: 'William Shakespeare' },
-  { text: 'Cry “Havoc!” and let slip the dogs of war.', by: 'William Shakespeare' },
-  { text: 'Cowards die many times before their deaths; the valiant never taste of death but once.', by: 'William Shakespeare' },
-  { text: 'War is cruelty. There is no use trying to reform it.', by: 'William Tecumseh Sherman' },
-  { text: 'It is well that war is so terrible, or we should grow too fond of it.', by: 'Robert E. Lee' },
-  { text: 'The art of war is of vital importance to the State.', by: 'Sun Tzu' },
-  { text: 'A good general not only sees the way to victory; he knows when victory is impossible.', by: 'Polybius' },
-  { text: 'Let them hate, so long as they fear.', by: 'Caligula' },
-  { text: 'Death is lighter than a feather; duty, heavier than a mountain.', by: 'Yamamoto Tsunetomo' },
-  { text: 'Even the finest sword plunged into salt water will eventually rust.', by: 'Sun Tzu' },
   { text: 'Who dares, wins.', by: 'British SAS' },
   { text: 'Through adversity, to the stars.', by: 'Royal Air Force' },
   { text: 'They shall not pass.', by: 'Robert Nivelle' },
   { text: 'I am the master of my fate: I am the captain of my soul.', by: 'William Ernest Henley' },
+  { text: 'The harder the conflict, the more glorious the triumph.', by: 'Thomas Paine' },
+  { text: 'We few, we happy few, we band of brothers.', by: 'William Shakespeare' },
+  { text: 'Once more unto the breach, dear friends, once more.', by: 'William Shakespeare' },
+  { text: 'Give me liberty, or give me death!', by: 'Patrick Henry' },
+  { text: 'In the midst of chaos, there is also opportunity.', by: 'Sun Tzu' },
 ];
+
+const QUOTES_WORSE: Quote[] = [
+  { text: 'These are the times that try men’s souls.', by: 'Thomas Paine' },
+  { text: 'I have nothing to offer but blood, toil, tears and sweat.', by: 'Winston Churchill' },
+  { text: 'War is cruelty. There is no use trying to reform it.', by: 'William Tecumseh Sherman' },
+  { text: 'It is well that war is so terrible, or we should grow too fond of it.', by: 'Robert E. Lee' },
+  { text: 'Even the finest sword plunged into salt water will eventually rust.', by: 'Sun Tzu' },
+  { text: 'Death is lighter than a feather; duty, heavier than a mountain.', by: 'Yamamoto Tsunetomo' },
+  { text: 'A good general not only sees the way to victory; he knows when victory is impossible.', by: 'Polybius' },
+  { text: 'Cowards die many times before their deaths; the valiant never taste of death but once.', by: 'William Shakespeare' },
+  { text: 'He who is prudent and lies in wait for an enemy who is not, will be victorious.', by: 'Sun Tzu' },
+  { text: 'The die is cast.', by: 'Julius Caesar' },
+  { text: 'Come back with your shield — or on it.', by: 'Spartan mothers' },
+  { text: 'Nuts.', by: 'Anthony McAuliffe' },
+];
+
+const QUOTES_SAME: Quote[] = [
+  { text: 'If you want peace, prepare for war.', by: 'Vegetius' },
+  { text: 'The art of war is of vital importance to the State.', by: 'Sun Tzu' },
+  { text: 'Know the enemy and know yourself; in a hundred battles, you will never be defeated.', by: 'Sun Tzu' },
+  { text: 'Never interrupt your enemy when he is making a mistake.', by: 'Napoleon Bonaparte' },
+  { text: 'Don’t fire until you see the whites of their eyes.', by: 'William Prescott' },
+  { text: 'Cry “Havoc!” and let slip the dogs of war.', by: 'William Shakespeare' },
+  { text: 'Let them hate, so long as they fear.', by: 'Caligula' },
+  { text: 'We shall fight on the beaches… we shall never surrender.', by: 'Winston Churchill' },
+];
+
+const VS_LABEL: Record<VictoryTone, string> = {
+  better: 'Stronger than yesterday',
+  worse:  'Weaker than yesterday',
+  same:   'Even with yesterday',
+};
 
 function pick<T>(arr: T[]): T {
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
-export function VictoryCelebration({ active }: VictoryProps) {
+function quotesFor(tone: VictoryTone): Quote[] {
+  if (tone === 'better') return QUOTES_BETTER;
+  if (tone === 'worse') return QUOTES_WORSE;
+  return QUOTES_SAME;
+}
+
+export function VictoryCelebration({ active, tone = 'same' }: VictoryProps) {
   const [show, setShow] = useState(false);
-  const [quote, setQuote] = useState(QUOTES[0]);
+  const [quote, setQuote] = useState(QUOTES_SAME[0]);
+  const [vsLabel, setVsLabel] = useState(VS_LABEL.same);
+  const [activeTone, setActiveTone] = useState<VictoryTone>('same');
   const [burstKey, setBurstKey] = useState(0);
   const prev = useRef(false);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -83,15 +114,19 @@ export function VictoryCelebration({ active }: VictoryProps) {
   const particles = useRef<Particle[]>([]);
   const bursts = useRef<Burst[]>([]);
   const endAt = useRef(0);
+  const toneRef = useRef(tone);
+  toneRef.current = tone;
 
   // Rising edge → launch the circus
   useEffect(() => {
     if (active && !prev.current) {
-      setQuote(pick(QUOTES));
+      const t = toneRef.current;
+      setActiveTone(t);
+      setQuote(pick(quotesFor(t)));
+      setVsLabel(VS_LABEL[t]);
       setBurstKey(k => k + 1);
       setShow(true);
       endAt.current = performance.now() + 7800;
-      // Seed an opening volley
       spawnVolley(0.55);
       spawnVolley(0.2);
       setTimeout(() => spawnVolley(0.75), 180);
@@ -111,6 +146,7 @@ export function VictoryCelebration({ active }: VictoryProps) {
   function spawnVolley(xBias = 0.5) {
     const w = window.innerWidth;
     const h = window.innerHeight;
+    const palette = toneRef.current === 'worse' ? COLORS_WORSE : COLORS;
     for (let i = 0; i < 90; i++) {
       const kindRoll = Math.random();
       const kind: Particle['kind'] =
@@ -123,7 +159,7 @@ export function VictoryCelebration({ active }: VictoryProps) {
         life: 1,
         maxLife: 0.7 + Math.random() * 1.4,
         size: kind === 'coin' ? 6 + Math.random() * 5 : 4 + Math.random() * 8,
-        color: pick(COLORS),
+        color: pick(palette),
         kind,
         rot: Math.random() * Math.PI * 2,
         spin: (Math.random() - 0.5) * 0.4,
@@ -180,11 +216,9 @@ export function VictoryCelebration({ active }: VictoryProps) {
       last = now;
       ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
 
-      // Occasional late fireworks while celebration runs
       if (now < endAt.current && Math.random() < 0.02) spawnFireworks();
       if (now < endAt.current - 2000 && Math.random() < 0.015) spawnVolley(Math.random());
 
-      // Burst rings
       bursts.current = bursts.current.filter(b => {
         b.t += dt;
         const r = b.t * 280;
@@ -263,11 +297,9 @@ export function VictoryCelebration({ active }: VictoryProps) {
     };
   }, [show, burstKey]);
 
-  // Auto-dismiss overlay chrome after the main blast (canvas may linger briefly)
   useEffect(() => {
     if (!show) return;
     const t = setTimeout(() => {
-      // Keep ambient complete styles via parent; hide loud overlay UI
       const el = document.querySelector('.victory-chrome');
       el?.classList.add('is-fading');
     }, 5200);
@@ -279,7 +311,7 @@ export function VictoryCelebration({ active }: VictoryProps) {
   return createPortal(
     <>
       {show && (
-        <div className="victory-root" key={burstKey} aria-hidden>
+        <div className={`victory-root tone-${activeTone}`} key={burstKey} aria-hidden>
           <canvas ref={canvasRef} className="victory-canvas" />
           <div className="victory-flash" />
           <div className="victory-rays" />
@@ -291,6 +323,7 @@ export function VictoryCelebration({ active }: VictoryProps) {
               <span className="victory-banner-glow" />
               <span className="victory-banner-text">“{quote.text}”</span>
               <span className="victory-banner-sub">— {quote.by}</span>
+              <span className={`victory-banner-vs tone-${activeTone}`}>{vsLabel}</span>
             </div>
             <div className="victory-stickers">
               {([0, 1, 2, 3, 4, 5, 6, 7] as const).map(i => (
@@ -302,7 +335,7 @@ export function VictoryCelebration({ active }: VictoryProps) {
           </div>
         </div>
       )}
-      {active && <div className="victory-ambient" aria-hidden />}
+      {active && <div className={`victory-ambient tone-${activeTone}`} aria-hidden />}
     </>,
     document.body,
   );

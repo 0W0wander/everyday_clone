@@ -178,9 +178,45 @@
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.55);
   animation: victory-sub-in 0.55s ease 0.5s both;
 }
+.victory-banner-vs {
+  display: block;
+  margin-top: 12px;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  font-size: clamp(13px, 2vw, 18px);
+  font-weight: 800;
+  font-style: normal;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.55);
+  animation: victory-sub-in 0.55s ease 0.7s both;
+}
+.victory-banner-vs.tone-better { color: #86efac; }
+.victory-banner-vs.tone-worse  { color: #fda4af; }
+.victory-banner-vs.tone-same   { color: #fde68a; }
 @keyframes victory-sub-in {
   from { opacity: 0; letter-spacing: 0.5em; transform: translateY(6px); }
   to   { opacity: 1; letter-spacing: 0.22em; transform: translateY(0); }
+}
+
+.victory-root.tone-worse .victory-rays {
+  background: repeating-conic-gradient(
+    from 0deg,
+    rgba(248, 113, 113, 0.16) 0deg 8deg,
+    transparent 8deg 18deg
+  );
+}
+.victory-root.tone-worse .victory-banner-glow {
+  background: radial-gradient(circle, rgba(248, 113, 113, 0.4), transparent 65%);
+}
+.victory-ambient.tone-worse {
+  background:
+    radial-gradient(ellipse at 50% 0%, rgba(248, 113, 113, 0.12), transparent 50%),
+    radial-gradient(ellipse at 100% 100%, rgba(251, 146, 60, 0.08), transparent 40%);
+}
+.victory-ambient.tone-better {
+  background:
+    radial-gradient(ellipse at 50% 0%, rgba(74, 222, 128, 0.14), transparent 50%),
+    radial-gradient(ellipse at 100% 100%, rgba(250, 204, 21, 0.08), transparent 40%);
 }
 
 /* Orbiting stickers */

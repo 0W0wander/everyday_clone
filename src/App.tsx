@@ -11,7 +11,7 @@ import {
 } from './sync';
 import { getQuote } from './quotes';
 import { MemoryGallery } from './Memory';
-import { VictoryCelebration } from './Victory';
+import { VictoryCelebration, type VictoryTone } from './Victory';
 
 // ─── Color utilities ──────────────────────────────────────────────────────────
 
@@ -118,6 +118,33 @@ function saveSettings(s: AppSettings) {
 
 function isHandledToday(h: Habit, ds: string): boolean {
   return h.completions.includes(ds) || h.skips.includes(ds) || h.fails.includes(ds);
+}
+
+/** Score a calendar day among habits due that day — used for victory vs-yesterday. */
+function dayMarkScore(habits: Habit[], ds: string, isDue: DueFn): { done: number; money: number; fails: number } {
+  let done = 0;
+  let money = 0;
+  let fails = 0;
+  for (const h of habits) {
+    if (!isDue(h, ds)) continue;
+    if (h.completions.includes(ds)) {
+      done += 1;
+      money += priceForDay(h, ds);
+    } else if (h.fails.includes(ds)) {
+      fails += 1;
+    }
+  }
+  return { done, money, fails };
+}
+
+function compareDayScores(
+  today: { done: number; money: number; fails: number },
+  yesterday: { done: number; money: number; fails: number },
+): VictoryTone {
+  if (today.money !== yesterday.money) return today.money > yesterday.money ? 'better' : 'worse';
+  if (today.done !== yesterday.done) return today.done > yesterday.done ? 'better' : 'worse';
+  if (today.fails !== yesterday.fails) return today.fails < yesterday.fails ? 'better' : 'worse';
+  return 'same';
 }
 
 function loadSpent(): number {
@@ -2870,18 +2897,33 @@ export default function App() {
   const todayDone  = todayPips.filter(p => p.done).length;
   const todayMoney = todayPips.reduce((s, p) => s + p.earned, 0);
   const dayStreak  = useMemo(() => calcDayStreak(visibleHabits, isDue), [visibleHabits, isDue]);
-  const dayPerfect = todayPips.length > 0 && todayDone === todayPips.length;
+  // Day is "cleared" once every due habit is marked — done, skip, or fail.
+  const todayHandled = useMemo(
+    () => visibleHabits.filter(h => isDue(h, todayStr) && isHandledToday(h, todayStr)).length,
+    [visibleHabits, todayStr, isDue],
+  );
+  const dayCleared = todayPips.length > 0 && todayHandled === todayPips.length;
+  const yesterdayStr = useMemo(() => {
+    const d = todayNoon();
+    d.setDate(d.getDate() - 1);
+    return fmt(d);
+  }, [todayStr]);
+  const victoryTone = useMemo((): VictoryTone => {
+    const todayScore = dayMarkScore(visibleHabits, todayStr, isDue);
+    const yScore = dayMarkScore(visibleHabits, yesterdayStr, isDue);
+    return compareDayScores(todayScore, yScore);
+  }, [visibleHabits, todayStr, yesterdayStr, isDue]);
   const [victoryBlast, setVictoryBlast] = useState(false);
-  const wasPerfectRef = useRef(false);
+  const wasClearedRef = useRef(false);
   useEffect(() => {
-    if (dayPerfect && !wasPerfectRef.current) {
+    if (dayCleared && !wasClearedRef.current) {
       setVictoryBlast(true);
       const t = setTimeout(() => setVictoryBlast(false), 4200);
-      wasPerfectRef.current = true;
+      wasClearedRef.current = true;
       return () => clearTimeout(t);
     }
-    if (!dayPerfect) wasPerfectRef.current = false;
-  }, [dayPerfect]);
+    if (!dayCleared) wasClearedRef.current = false;
+  }, [dayCleared]);
 
   // Habit IDs that finished the settle delay in hide mode (safe to drop from the board).
   const [hideSettledIds, setHideSettledIds] = useState<Set<string>>(() => new Set());
@@ -3004,12 +3046,12 @@ export default function App() {
 
   return (
     <div
-      className={`app${isMobile ? ' mobile' : ''}${victoryBlast ? ' victory-blast' : ''}${dayPerfect ? ' victory-complete' : ''}`}
+      className={`app${isMobile ? ' mobile' : ''}${victoryBlast ? ' victory-blast' : ''}${dayCleared ? ' victory-complete' : ''}`}
       style={{ '--row-h': `${rowH}px` } as React.CSSProperties}
     >
-      <VictoryCelebration active={dayPerfect} />
+      <VictoryCelebration active={dayCleared} tone={victoryTone} />
       {/* ── Unified header (toolbar + daily progress) ── */}
-      <header className={`app-header${dayPerfect ? ' is-complete' : ''}`}>
+      <header className={`app-header${dayCleared ? ' is-complete' : ''}`}>
         <DailyProgress
           pips={todayPips}
           done={todayDone}
