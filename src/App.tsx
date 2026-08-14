@@ -22,6 +22,8 @@ const LEGACY_COLOR_HEX: Record<string, string> = {
 };
 const DEFAULT_COLOR = '#4ade80';
 const DEFAULT_PRICE = 0.1;  // $ per normal / base-level completion
+/** Bonus for clearing a day by actually completing every due habit (not skip/fail). */
+const PERFECT_DAY_BONUS = 10;
 
 // #rrggbb (or #rgb) → [H 0-360, S 0-100, L 0-100]
 function hexToHsl(hex: string): [number, number, number] {
@@ -554,22 +556,22 @@ function withAutoPromote(h: Habit, loggedLevel: number, isDue: DueFn = isSchedul
 function calcDayStreak(habits: Habit[], isDue: DueFn = isScheduledOn): number {
   if (habits.length === 0) return 0;
   const comp = new Map<string, Set<string>>();
-  const skip = new Map<string, Set<string>>();
   let earliest: string | null = null;
   for (const h of habits) {
     comp.set(h.id, new Set(h.completions));
-    skip.set(h.id, new Set(h.skips));
-    for (const ds of [...h.completions, ...h.skips]) {
+    for (const ds of h.completions) {
       if (earliest === null || ds < earliest) earliest = ds;
     }
   }
   if (earliest === null) return 0;
 
-  // 'ok' = all due done/skipped, 'fail' = something due missed, 'none' = nothing due
+  // 'ok' = every due habit actually completed (skips/fails do not count)
+  // 'fail' = something due was missed / skipped / failed
+  // 'none' = nothing due
   const dayState = (ds: string): 'ok' | 'fail' | 'none' => {
     const due = habits.filter(h => isDue(h, ds));
     if (due.length === 0) return 'none';
-    return due.every(h => comp.get(h.id)!.has(ds) || skip.get(h.id)!.has(ds)) ? 'ok' : 'fail';
+    return due.every(h => comp.get(h.id)!.has(ds)) ? 'ok' : 'fail';
   };
 
   const d = todayNoon();
@@ -583,6 +585,26 @@ function calcDayStreak(habits: Habit[], isDue: DueFn = isScheduledOn): number {
     d.setDate(d.getDate() - 1);
   }
   return streak;
+}
+
+/** True when every habit due on `ds` was actually completed (not skip/fail). */
+function isPerfectCompletionDay(habits: Habit[], ds: string, isDue: DueFn): boolean {
+  const due = habits.filter(h => isDue(h, ds));
+  if (due.length === 0) return false;
+  return due.every(h => h.completions.includes(ds));
+}
+
+/** $10 × number of perfect completion days (all due habits actually done). */
+function perfectDayBonusTotal(habits: Habit[], isDue: DueFn): number {
+  const dates = new Set<string>();
+  for (const h of habits) {
+    for (const ds of h.completions) dates.add(ds);
+  }
+  let n = 0;
+  for (const ds of dates) {
+    if (isPerfectCompletionDay(habits, ds, isDue)) n += 1;
+  }
+  return n * PERFECT_DAY_BONUS;
 }
 
 
@@ -2187,14 +2209,21 @@ const DailyProgress = memo(function DailyProgress(
           <span className="dp-top-right">
             <span
               className={`dp-streak${dayStreak > 0 ? '' : ' zero'}`}
-              title="Days in a row with every habit completed"
+              title="Days in a row with every due habit actually completed (skips don’t count)"
             >
               <FlameIcon active={dayStreak > 0} />
               {dayStreak > 0
                 ? <>{dayStreak} day{dayStreak === 1 ? '' : 's'} streak</>
                 : <>No day streak yet</>}
             </span>
-            <span className="dp-earned" title="Earned today">${earned.toFixed(2)}</span>
+            <span
+              className="dp-earned"
+              title={
+                allDone
+                  ? `Habit earnings + $${PERFECT_DAY_BONUS.toFixed(0)} perfect-day bonus`
+                  : 'Earned today'
+              }
+            >${earned.toFixed(2)}</span>
           </span>
         </div>
 
@@ -2225,9 +2254,10 @@ const DailyProgress = memo(function DailyProgress(
 // ─── MoneyMenu — top-right balance with a hover "spend" popover ──────────────
 
 const MoneyMenu = memo(function MoneyMenu(
-  { earned, spent, lastSpend, onSpend, onUndo }: {
+  { earned, spent, lastSpend, onSpend, onUndo, perfectBonus = 0 }: {
     earned: number; spent: number; lastSpend: number;
     onSpend: (amt: number) => void; onUndo: () => void;
+    perfectBonus?: number;
   }
 ) {
   const [open, setOpen] = useState(false);
@@ -2256,7 +2286,19 @@ const MoneyMenu = memo(function MoneyMenu(
       {open && (
         <div className="money-menu" onMouseEnter={openNow} onMouseLeave={closeSoon}>
           <div className="money-menu-rows">
-            <div className="money-menu-row"><span>Earned</span><span className="mm-pos">+${earned.toFixed(2)}</span></div>
+            <div className="money-menu-row">
+              <span>Habits</span>
+              <span className="mm-pos">+${(earned - perfectBonus).toFixed(2)}</span>
+            </div>
+            {perfectBonus > 0 && (
+              <div
+                className="money-menu-row"
+                title={`$${PERFECT_DAY_BONUS} each day every due habit was actually completed`}
+              >
+                <span>Day streak bonuses</span>
+                <span className="mm-pos">+${perfectBonus.toFixed(2)}</span>
+              </div>
+            )}
             <div className="money-menu-row">
               <span>Last spent</span>
               <span className="mm-neg">
@@ -2907,7 +2949,7 @@ export default function App() {
   const hideCommentTooltip = useCallback(() => setCommentTooltip(null), []);
 
   // Per-habit pricing: per-level price when levels exist, else flat price
-  const totalMoney = useMemo(() => habits.reduce((sum, h) =>
+  const habitMoney = useMemo(() => habits.reduce((sum, h) =>
     sum + h.completions.reduce((s, ds) => s + priceForDay(h, ds), 0),
   0), [habits]);
   const dailyCount = useCallback((ds: string) =>
@@ -2922,6 +2964,12 @@ export default function App() {
     () => makeIsDue(templates, todayStr, activeTemplateId, templateOverrideDate),
     [templates, todayStr, activeTemplateId, templateOverrideDate],
   );
+
+  const perfectBonusTotal = useMemo(
+    () => perfectDayBonusTotal(habits, isDue),
+    [habits, isDue],
+  );
+  const totalMoney = habitMoney + perfectBonusTotal;
 
   const activeDisabled = useMemo(() => {
     const tpl = templates.find(t => t.id === activeTemplateId);
@@ -2958,7 +3006,9 @@ export default function App() {
     [visibleHabits, todayStr, isDue],
   );
   const todayDone  = todayPips.filter(p => p.done).length;
-  const todayMoney = todayPips.reduce((s, p) => s + p.earned, 0);
+  const todayPerfect = todayPips.length > 0 && todayDone === todayPips.length;
+  const todayMoney = todayPips.reduce((s, p) => s + p.earned, 0)
+    + (todayPerfect ? PERFECT_DAY_BONUS : 0);
   const dayStreak  = useMemo(() => calcDayStreak(visibleHabits, isDue), [visibleHabits, isDue]);
   // Day is "cleared" once every due habit is marked — done, skip, or fail.
   const todayHandled = useMemo(
@@ -3187,6 +3237,7 @@ export default function App() {
                   lastSpend={lastSpend}
                   onSpend={spend}
                   onUndo={undoLastSpend}
+                  perfectBonus={perfectBonusTotal}
                 />
                 {!isMobile && <span className="username">Kevin ▾</span>}
               </div>
