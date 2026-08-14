@@ -121,12 +121,16 @@ function isHandledToday(h: Habit, ds: string): boolean {
 }
 
 /** Score a calendar day among habits due that day — used for victory vs-yesterday. */
-function dayMarkScore(habits: Habit[], ds: string, isDue: DueFn): { done: number; money: number; fails: number } {
+function dayMarkScore(habits: Habit[], ds: string, isDue: DueFn): {
+  money: number; rate: number; fails: number;
+} {
+  let due = 0;
   let done = 0;
   let money = 0;
   let fails = 0;
   for (const h of habits) {
     if (!isDue(h, ds)) continue;
+    due += 1;
     if (h.completions.includes(ds)) {
       done += 1;
       money += priceForDay(h, ds);
@@ -134,15 +138,16 @@ function dayMarkScore(habits: Habit[], ds: string, isDue: DueFn): { done: number
       fails += 1;
     }
   }
-  return { done, money, fails };
+  return { money, rate: due > 0 ? done / due : 0, fails };
 }
 
 function compareDayScores(
-  today: { done: number; money: number; fails: number },
-  yesterday: { done: number; money: number; fails: number },
+  today: { money: number; rate: number; fails: number },
+  yesterday: { money: number; rate: number; fails: number },
 ): VictoryTone {
   if (today.money !== yesterday.money) return today.money > yesterday.money ? 'better' : 'worse';
-  if (today.done !== yesterday.done) return today.done > yesterday.done ? 'better' : 'worse';
+  // Rate = completions / habits due that day (fair across every-other-day schedules).
+  if (today.rate !== yesterday.rate) return today.rate > yesterday.rate ? 'better' : 'worse';
   if (today.fails !== yesterday.fails) return today.fails < yesterday.fails ? 'better' : 'worse';
   return 'same';
 }
@@ -296,6 +301,54 @@ function rateColor(rate: number, accent: string): string {
   if (rate >= 50) return accent;
   if (rate >= 25) return '#f59e0b';
   return '#ef4444';
+}
+
+/** Darken a hex for text sitting on a filled habit cell. */
+function darkenHex(hex: string, amount = 0.28): string {
+  const raw = hex.replace('#', '');
+  const full = raw.length === 3 ? raw.split('').map(c => c + c).join('') : raw.padEnd(6, '0').slice(0, 6);
+  const n = parseInt(full, 16);
+  if (!Number.isFinite(n)) return hex;
+  const ch = (shift: number) => Math.max(0, Math.round(((n >> shift) & 255) * (1 - amount)));
+  return `#${[ch(16), ch(8), ch(0)].map(x => x.toString(16).padStart(2, '0')).join('')}`;
+}
+
+/** Cell % tint: accent (darkened) when healthy, amber/red when low — same bands as stats. */
+function cellRateColor(rate: number, accent: string): string {
+  if (rate >= 50) return darkenHex(accent, 0.3);
+  if (rate >= 25) return '#d97706';
+  return '#dc2626';
+}
+
+/**
+ * Completion rate over the last `months` months, only counting days the habit
+ * was scheduled/due (so every-other-day habits aren't punished).
+ */
+function rateLastMonths(h: Habit, months = 3): number {
+  const tod = todayNoon();
+  const todStr = fmt(tod);
+  const from = new Date(tod);
+  from.setMonth(from.getMonth() - months);
+  let fromStr = fmt(from);
+
+  // Don't count empty history before the habit had any activity.
+  const firstComp = h.completions.length ? [...h.completions].sort()[0] : null;
+  if (firstComp && firstComp > fromStr) fromStr = firstComp;
+
+  let due = 0;
+  let done = 0;
+  const cur = new Date(fromStr + 'T12:00:00');
+  const end = new Date(todStr + 'T12:00:00');
+  while (cur <= end) {
+    const ds = fmt(cur);
+    if (isScheduledOn(h, ds)) {
+      due += 1;
+      if (h.completions.includes(ds)) done += 1;
+    }
+    cur.setDate(cur.getDate() + 1);
+  }
+  if (due === 0) return 0;
+  return Math.round((done / due) * 100);
 }
 
 const STAT_HEADERS: string[][] = [
@@ -1878,6 +1931,7 @@ const HabitRow = memo(function HabitRow(
   const wkRate  = useMemo(() => rateFrom(habit.completions, startOfWeek()),  [habit.completions]);
   const moRate  = useMemo(() => rateFrom(habit.completions, startOfMonth()), [habit.completions]);
   const allRate = useMemo(() => allTimeRate(habit.completions),               [habit.completions]);
+  const rate3m  = useMemo(() => rateLastMonths(habit, 3), [habit]);
 
   // Tell the board when hide-mode may drop this row (after settle — never instantly).
   // No unmount cleanup: clearing here would re-insert the row and loop forever.
@@ -1995,6 +2049,15 @@ const HabitRow = memo(function HabitRow(
             {showLeft  && <div className="cell-skip cell-skip-left"  style={{ background: bg }} />}
             {showRight && <div className="cell-skip cell-skip-right" style={{ background: bg }} />}
             {faild && <div className="cell-fail" />}
+            {done && (
+              <span
+                className="cell-rate"
+                style={{ color: cellRateColor(rate3m, acc) }}
+                title={`${rate3m}% of due days completed in the last 3 months`}
+              >
+                {rate3m}%
+              </span>
+            )}
             {showLevelPips && (
               <div
                 className={`cell-level-pips${isMaxLevel ? ' is-max' : ''}`}
