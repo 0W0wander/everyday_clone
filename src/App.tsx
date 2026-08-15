@@ -9,7 +9,7 @@ import type {
 import {
   fetchRemote, pushRemote, isSyncConfigured,
 } from './sync';
-import { getQuote } from './quotes';
+import { getQuote, type Quote } from './quotes';
 import { MemoryGallery } from './Memory';
 import { VictoryCelebration, type VictoryTone } from './Victory';
 
@@ -2160,96 +2160,60 @@ const HabitRow = memo(function HabitRow(
   );
 });
 
-// ─── Daily Progress (gamified) ──────────────────────────────────────────────
+// ─── Daily Progress (thin bean row) ─────────────────────────────────────────
 
-interface DayPip { id: string; name: string; color: string; done: boolean; earned: number; }
+interface DayPip { id: string; name: string; color: string; done: boolean; }
 
-const DailyProgress = memo(function DailyProgress(
-  { pips, done, total, viewingToday, daySeed, earned, dayStreak, tools }: {
-    pips: DayPip[]; done: number; total: number; viewingToday: boolean;
-    daySeed: number; earned: number; dayStreak: number; tools?: React.ReactNode;
-  }
-) {
-  const remaining = total - done;
-  const percent   = total === 0 ? 0 : Math.round((done / total) * 100);
-  const allDone   = total > 0 && remaining === 0;
-  const quote     = getQuote(done, total, daySeed);
-
-  // ring geometry
-  const R = 30, C = 2 * Math.PI * R;
-  const dash = C * (total === 0 ? 0 : done / total);
-
+const DailyProgress = memo(function DailyProgress({ pips }: { pips: DayPip[] }) {
   return (
-    <section className={`daily-progress${allDone ? ' is-complete' : ''}`}>
-      <div className="dp-ring" role="img" aria-label={`${percent}% of habits complete`}>
-        <svg width="74" height="74" viewBox="0 0 74 74">
-          <circle className="dp-ring-track" cx="37" cy="37" r={R} />
-          <circle
-            className="dp-ring-fill"
-            cx="37" cy="37" r={R}
-            strokeDasharray={`${dash} ${C}`}
-            transform="rotate(-90 37 37)"
+    <section className="daily-progress" aria-label="Today’s habits">
+      <div className="dp-pips">
+        {pips.map(p => (
+          <span
+            key={p.id}
+            className={`dp-pip${p.done ? ' filled' : ''}`}
+            style={p.done ? { background: p.color } : undefined}
+            title={p.name}
           />
-        </svg>
-        <div className="dp-ring-label">
-          {allDone ? <span className="dp-check">{'\u2713'}</span>
-                   : <span className="dp-pct">{percent}%</span>}
-        </div>
-      </div>
-
-      <div className="dp-body">
-        <div className="dp-top">
-          <span className="dp-title">
-            {viewingToday ? 'Today' : 'Today (so far)'}
-          </span>
-          <span className="dp-counts">
-            <strong>{done}</strong> / {total} done
-            {remaining > 0 && <span className="dp-left"> {'\u00b7'} {remaining} to go</span>}
-          </span>
-          <span className="dp-top-right">
-            <span
-              className={`dp-streak${dayStreak > 0 ? '' : ' zero'}`}
-              title="Days in a row with every due habit actually completed (skips don’t count)"
-            >
-              <FlameIcon active={dayStreak > 0} />
-              {dayStreak > 0
-                ? <>{dayStreak} day{dayStreak === 1 ? '' : 's'} streak</>
-                : <>No day streak yet</>}
-            </span>
-            <span
-              className="dp-earned"
-              title={
-                allDone
-                  ? `Habit earnings + $${PERFECT_DAY_BONUS.toFixed(0)} perfect-day bonus`
-                  : 'Earned today'
-              }
-            >${earned.toFixed(2)}</span>
-          </span>
-        </div>
-
-        <div className="dp-pips" aria-hidden="true">
-          {pips.map(p => (
-            <span
-              key={p.id}
-              className={`dp-pip${p.done ? ' filled' : ''}`}
-              style={p.done ? { background: p.color, boxShadow: `0 0 0 1px ${p.color}` } : undefined}
-              title={`${p.name}${p.done ? ` \u2014 $${p.earned.toFixed(2)}` : ''}`}
-            />
-          ))}
-          {total === 0 && <span className="dp-pip-empty">No habits yet</span>}
-        </div>
-
-        <div className="dp-bottom">
-          <div className="dp-quote">
-            <span className="dp-quote-text">{quote.text}</span>
-            <span className="dp-quote-source">{'\u2014 '}{quote.source}</span>
-          </div>
-          {tools}
-        </div>
+        ))}
+        {pips.length === 0 && <span className="dp-pip-empty">No habits yet</span>}
       </div>
     </section>
   );
 });
+
+function DateQuoteFlash({
+  ds, quote, nonce, onDone,
+}: {
+  ds: string; quote: Quote; nonce: number; onDone: () => void;
+}) {
+  const [pos, setPos] = useState<{ top: number; left: number; maxW: number } | null>(null);
+
+  useLayoutEffect(() => {
+    const el = document.querySelector(`[data-date-header="${ds}"]`);
+    if (!el) { onDone(); return; }
+    const r = el.getBoundingClientRect();
+    const vw = window.innerWidth;
+    const maxW = Math.min(300, vw - 16);
+    const left = Math.max(8 + maxW / 2, Math.min(vw - 8 - maxW / 2, r.left + r.width / 2));
+    setPos({ top: r.bottom + 6, left, maxW });
+    const t = setTimeout(onDone, 2400);
+    return () => clearTimeout(t);
+  }, [ds, nonce, onDone]);
+
+  if (!pos) return null;
+  return createPortal(
+    <div
+      key={nonce}
+      className="date-quote-flash"
+      style={{ top: pos.top, left: pos.left, maxWidth: pos.maxW }}
+    >
+      <span className="date-quote-text">{quote.text}</span>
+      <span className="date-quote-source">{'\u2014 '}{quote.source}</span>
+    </div>,
+    document.body,
+  );
+}
 
 // ─── MoneyMenu — top-right balance with a hover "spend" popover ──────────────
 
@@ -2435,7 +2399,9 @@ export default function App() {
   const [syncStatus,  setSyncStatus]  = useState<'idle'|'syncing'|'synced'|'error'>('idle');
   const [syncToast,   setSyncToast]   = useState<{ type: 'success'|'error'; msg: string } | null>(null);
   const [showMemory, setShowMemory] = useState(false);
+  const [quoteFlash, setQuoteFlash] = useState<{ ds: string; quote: Quote; nonce: number } | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clearQuoteFlash = useCallback(() => setQuoteFlash(null), []);
 
   useEffect(() => { saveSettings(settings); }, [settings]);
 
@@ -2702,29 +2668,39 @@ export default function App() {
   // Cycle: empty → done → skip → fail → empty
   const toggle = useCallback((id: string, ds: string) => {
     const due = makeIsDue(templates, fmt(todayNoon()), activeTemplateId, templateOverrideDate);
-    setHabits(prev => prev.map(h => {
-      if (h.id !== id) return h;
-      const done = h.completions.includes(ds);
-      const skpd = h.skips.includes(ds);
-      const fail = h.fails.includes(ds);
-      const hasLevels = habitHasLevels(h);
-      if (!done && !skpd && !fail) {
-        // empty → done: record at the habit's active level (index into effective levels)
-        const logged = hasLevels
-          ? Math.min(h.activeLevel ?? 0, effectiveLevels(h).length - 1)
-          : 0;
-        const dayLevels = hasLevels
-          ? { ...(h.dayLevels ?? {}), [ds]: logged }
-          : h.dayLevels;
-        const next = { ...h, completions: [...h.completions, ds], dayLevels };
-        return hasLevels ? withAutoPromote(next, logged, due) : next;
+    setHabits(prev => {
+      const target = prev.find(h => h.id === id);
+      if (target && !target.completions.includes(ds) && !target.skips.includes(ds) && !target.fails.includes(ds)) {
+        const dueHabits = prev.filter(h => due(h, ds));
+        const doneAfter = dueHabits.filter(h => h.id === id || h.completions.includes(ds)).length;
+        const seed = Number(ds.replace(/-/g, '')) || 0;
+        const quote = getQuote(doneAfter, dueHabits.length, seed);
+        setTimeout(() => setQuoteFlash({ ds, quote, nonce: Date.now() }), 0);
       }
-      if (done)
-        return { ...h, completions: h.completions.filter(c => c !== ds), skips: [...h.skips, ds], dayLevels: dropDayLevel(h.dayLevels, ds) };
-      if (skpd)
-        return { ...h, skips: h.skips.filter(s => s !== ds), fails: [...h.fails, ds] };
-      return { ...h, fails: h.fails.filter(f => f !== ds) };
-    }));
+      return prev.map(h => {
+        if (h.id !== id) return h;
+        const done = h.completions.includes(ds);
+        const skpd = h.skips.includes(ds);
+        const fail = h.fails.includes(ds);
+        const hasLevels = habitHasLevels(h);
+        if (!done && !skpd && !fail) {
+          // empty → done: record at the habit's active level (index into effective levels)
+          const logged = hasLevels
+            ? Math.min(h.activeLevel ?? 0, effectiveLevels(h).length - 1)
+            : 0;
+          const dayLevels = hasLevels
+            ? { ...(h.dayLevels ?? {}), [ds]: logged }
+            : h.dayLevels;
+          const next = { ...h, completions: [...h.completions, ds], dayLevels };
+          return hasLevels ? withAutoPromote(next, logged, due) : next;
+        }
+        if (done)
+          return { ...h, completions: h.completions.filter(c => c !== ds), skips: [...h.skips, ds], dayLevels: dropDayLevel(h.dayLevels, ds) };
+        if (skpd)
+          return { ...h, skips: h.skips.filter(s => s !== ds), fails: [...h.fails, ds] };
+        return { ...h, fails: h.fails.filter(f => f !== ds) };
+      });
+    });
   }, [templates, activeTemplateId, templateOverrideDate]);
 
   const closeAdd = useCallback(() => {
@@ -2995,20 +2971,12 @@ export default function App() {
   }, [todayStr, templates, templateOverrideDate, activeTemplateId, applyTemplateById]);
 
   const todayPips = useMemo(
-    () => visibleHabits.filter(h => isDue(h, todayStr)).map(h => {
-      const done = h.completions.includes(todayStr);
-      return {
-        id: h.id, name: h.name, color: h.color,
-        done,
-        earned: done ? priceForDay(h, todayStr) : 0,
-      };
-    }),
+    () => visibleHabits.filter(h => isDue(h, todayStr)).map(h => ({
+      id: h.id, name: h.name, color: h.color,
+      done: h.completions.includes(todayStr),
+    })),
     [visibleHabits, todayStr, isDue],
   );
-  const todayDone  = todayPips.filter(p => p.done).length;
-  const todayPerfect = todayPips.length > 0 && todayDone === todayPips.length;
-  const todayMoney = todayPips.reduce((s, p) => s + p.earned, 0)
-    + (todayPerfect ? PERFECT_DAY_BONUS : 0);
   const dayStreak  = useMemo(() => calcDayStreak(visibleHabits, isDue), [visibleHabits, isDue]);
   // Day is "cleared" once every due habit is marked — done, skip, or fail.
   const todayHandled = useMemo(
@@ -3103,13 +3071,6 @@ export default function App() {
   }, [habits, sections, boardOrder, editMode, showAllHabits, todayStr, isDue, activeHiddenSections, settings.doneDisplay, isCurrentDay, hideSettledIds]);
   const shownHabitCount = boardRows.filter(r => r.kind === 'habit').length;
   const hiddenCount = visibleHabits.length - shownHabitCount;
-  // Stable per-day seed so "start"/"victory" quotes vary day to day.
-  const daySeed = useMemo(() => {
-    const d = todayNoon();
-    return d.getFullYear() * 1000 + Math.floor(
-      (d.getTime() - new Date(d.getFullYear(), 0, 0).getTime()) / 86400000,
-    );
-  }, [todayStr]);
 
   const { wName, wDay, wToday, wStat, daysBack, rowH, isMobile } = layout;
   const statCount = STAT_HEADERS[analyticsView].length;
@@ -3163,88 +3124,113 @@ export default function App() {
       style={{ '--row-h': `${rowH}px` } as React.CSSProperties}
     >
       <VictoryCelebration active={dayCleared} tone={victoryTone} />
-      {/* ── Unified header (toolbar + daily progress) ── */}
+      {/* ── Thin header: toolbar + beans ── */}
       <header className={`app-header${dayCleared ? ' is-complete' : ''}`}>
-        <DailyProgress
-          pips={todayPips}
-          done={todayDone}
-          total={todayPips.length}
-          viewingToday={isCurrentDay}
-          daySeed={daySeed}
-          earned={todayMoney}
-          dayStreak={dayStreak}
-          tools={
-            <div className="app-header-tools">
-              <div className="nav-group">
-                <button className="nav-btn" onClick={() => setOffset(o => o + 1)}>‹</button>
-                <button className="nav-btn" onClick={() => setOffset(o => Math.max(0, o - 1))} disabled={offset === 0}>›</button>
-              </div>
-              <div className="user-bar">
-                <button className="data-btn" onClick={exportData} title="Export your habits">
-                  <DownloadIcon />
-                </button>
-                <button className="data-btn" onClick={() => fileInputRef.current?.click()} title="Import habits from file">
-                  <UploadIcon />
-                </button>
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept="application/json"
-                  style={{ display: 'none' }}
-                  onChange={e => {
-                    const f = e.target.files?.[0];
-                    if (f) importData(f);
-                    e.target.value = '';
-                  }}
-                />
-                <button
-                  className={`sync-btn sync-btn-${syncStatus}`}
-                  onClick={syncNow}
-                  disabled={syncStatus === 'syncing'}
-                  title={
-                    !isSyncConfigured()       ? 'Sync not configured — click for details' :
-                    syncStatus === 'syncing'  ? 'Syncing…' :
-                    syncStatus === 'synced'   ? 'Saved to cloud — click to sync now' :
-                    syncStatus === 'error'    ? 'Sync error — click to retry' :
-                                               'Click to sync now'
-                  }
-                >
-                  <SyncIcon spinning={syncStatus === 'syncing'} />
-                </button>
-                <button
-                  className="data-btn"
-                  onClick={() => {
-                    if (!isSyncConfigured()) {
-                      showToast('error', 'Sync not configured — add VITE_GIST_ID and VITE_GITHUB_TOKEN in Vercel settings');
-                      return;
-                    }
-                    setShowMemory(true);
-                  }}
-                  title="Memory — browse past syncs"
-                >
-                  <HistoryIcon />
-                </button>
-                <button
-                  className="data-btn"
-                  onClick={() => setShowSettings(true)}
-                  title="Settings"
-                >
-                  <SettingsIcon />
-                </button>
-                <MoneyMenu
-                  earned={totalMoney}
-                  spent={spent}
-                  lastSpend={lastSpend}
-                  onSpend={spend}
-                  onUndo={undoLastSpend}
-                  perfectBonus={perfectBonusTotal}
-                />
-                {!isMobile && <span className="username">Kevin ▾</span>}
-              </div>
-            </div>
-          }
-        />
+        <div className="app-header-tools">
+          <TemplatePicker
+            templates={templates}
+            activeTemplateId={activeTemplateId}
+            onSelect={id => applyTemplateById(id, true)}
+            onManage={() => setShowTemplates(true)}
+          />
+          <button
+            className={`eye-btn${showAllHabits ? ' active' : ''}`}
+            onClick={() => setShowAllHabits(v => !v)}
+            disabled={editMode}
+            title={
+              editMode ? 'All habits shown while editing'
+              : showAllHabits ? 'Showing all habits — click to show only today’s'
+              : hiddenCount > 0 ? `Showing today’s habits (${hiddenCount} hidden) — click to show all`
+              : 'Showing all habits'
+            }
+          >
+            {showAllHabits || editMode ? <EyeIcon /> : <EyeOffIcon />}
+          </button>
+          <button
+            className={`edit-mode-btn${editMode ? ' active' : ''}`}
+            onClick={() => { setEditMode(m => !m); cancelEdit(); closeAdd(); }}
+            title={editMode ? 'Done editing' : 'Edit habits'}
+          >
+            <SlidersIcon />
+          </button>
+          <div className="nav-group">
+            <button className="nav-btn" onClick={() => setOffset(o => o + 1)}>‹</button>
+            <button className="nav-btn" onClick={() => setOffset(o => Math.max(0, o - 1))} disabled={offset === 0}>›</button>
+          </div>
+          <div className="user-bar">
+            <button className="data-btn" onClick={exportData} title="Export your habits">
+              <DownloadIcon />
+            </button>
+            <button className="data-btn" onClick={() => fileInputRef.current?.click()} title="Import habits from file">
+              <UploadIcon />
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="application/json"
+              style={{ display: 'none' }}
+              onChange={e => {
+                const f = e.target.files?.[0];
+                if (f) importData(f);
+                e.target.value = '';
+              }}
+            />
+            <button
+              className={`sync-btn sync-btn-${syncStatus}`}
+              onClick={syncNow}
+              disabled={syncStatus === 'syncing'}
+              title={
+                !isSyncConfigured()       ? 'Sync not configured — click for details' :
+                syncStatus === 'syncing'  ? 'Syncing…' :
+                syncStatus === 'synced'   ? 'Saved to cloud — click to sync now' :
+                syncStatus === 'error'    ? 'Sync error — click to retry' :
+                                           'Click to sync now'
+              }
+            >
+              <SyncIcon spinning={syncStatus === 'syncing'} />
+            </button>
+            <button
+              className="data-btn"
+              onClick={() => {
+                if (!isSyncConfigured()) {
+                  showToast('error', 'Sync not configured — add VITE_GIST_ID and VITE_GITHUB_TOKEN in Vercel settings');
+                  return;
+                }
+                setShowMemory(true);
+              }}
+              title="Memory — browse past syncs"
+            >
+              <HistoryIcon />
+            </button>
+            <button
+              className="data-btn"
+              onClick={() => setShowSettings(true)}
+              title="Settings"
+            >
+              <SettingsIcon />
+            </button>
+            <MoneyMenu
+              earned={totalMoney}
+              spent={spent}
+              lastSpend={lastSpend}
+              onSpend={spend}
+              onUndo={undoLastSpend}
+              perfectBonus={perfectBonusTotal}
+            />
+            {!isMobile && <span className="username">Kevin ▾</span>}
+          </div>
+        </div>
+        <DailyProgress pips={todayPips} />
       </header>
+      {quoteFlash && (
+        <DateQuoteFlash
+          key={quoteFlash.nonce}
+          ds={quoteFlash.ds}
+          quote={quoteFlash.quote}
+          nonce={quoteFlash.nonce}
+          onDone={clearQuoteFlash}
+        />
+      )}
 
       {/* ── Sync toast ── */}
       {syncToast && (
@@ -3262,40 +3248,24 @@ export default function App() {
             {/* ─ Header ─ */}
             <div className="cell ch habits-header">
               <span className="habits-label">HABITS</span>
-              <div className="habits-header-actions">
-                <TemplatePicker
-                  templates={templates}
-                  activeTemplateId={activeTemplateId}
-                  onSelect={id => applyTemplateById(id, true)}
-                  onManage={() => setShowTemplates(true)}
-                />
-                <button
-                  className={`eye-btn${showAllHabits ? ' active' : ''}`}
-                  onClick={() => setShowAllHabits(v => !v)}
-                  disabled={editMode}
-                  title={
-                    editMode ? 'All habits shown while editing'
-                    : showAllHabits ? 'Showing all habits — click to show only today’s'
-                    : hiddenCount > 0 ? `Showing today’s habits (${hiddenCount} hidden) — click to show all`
-                    : 'Showing all habits'
-                  }
-                >
-                  {showAllHabits || editMode ? <EyeIcon /> : <EyeOffIcon />}
-                </button>
-                <button
-                  className={`edit-mode-btn${editMode ? ' active' : ''}`}
-                  onClick={() => { setEditMode(m => !m); cancelEdit(); closeAdd(); }}
-                  title={editMode ? 'Done editing' : 'Edit habits'}
-                >
-                  <SlidersIcon />
-                </button>
-              </div>
+              <span
+                className={`board-streak${dayStreak > 0 ? '' : ' zero'}`}
+                title="Days in a row with every due habit actually completed (skips don’t count)"
+              >
+                <FlameIcon active={dayStreak > 0} />
+                {dayStreak > 0 ? dayStreak : '—'}
+              </span>
             </div>
 
             {dates.map((d, i) => {
               const isTd = isCurrentDay && i === dates.length - 1;
+              const ds = fmt(d);
               return (
-                <div key={`dh-${i}`} className={`cell ch date-header${isTd ? ' today-header' : ''}`}>
+                <div
+                  key={`dh-${i}`}
+                  data-date-header={ds}
+                  className={`cell ch date-header${isTd ? ' today-header' : ''}${quoteFlash?.ds === ds ? ' quote-flashing' : ''}`}
+                >
                   <span className="d-month">{MONTHS[d.getMonth()]}</span>
                   {isTd ? <span className="today-circle">{d.getDate()}</span>
                         : <span className="d-num">{d.getDate()}</span>}

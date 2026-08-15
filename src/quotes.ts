@@ -1,4 +1,4 @@
-// Motivational quotes for the Daily Progress band.
+// Motivational quotes flashed on a date column when you complete a habit.
 //
 // Two themed collections:
 //   • WAR_QUOTES  — Call of Duty-style loading-screen war quotes (historical figures)
