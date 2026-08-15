@@ -2979,7 +2979,11 @@ export default function App() {
   }, [dayCleared]);
 
   // Habit IDs that finished the settle delay in hide mode (safe to drop from the board).
-  const [hideSettledIds, setHideSettledIds] = useState<Set<string>>(() => new Set());
+  // Start with today's already-handled habits so empty section headers don't flash on load.
+  const [hideSettledIds, setHideSettledIds] = useState<Set<string>>(() => {
+    const ds = fmt(todayNoon());
+    return new Set(habits.filter(h => isHandledToday(h, ds)).map(h => h.id));
+  });
   const onHideSettled = useCallback((id: string, hidden: boolean) => {
     setHideSettledIds(prev => {
       const has = prev.has(id);
@@ -2989,7 +2993,20 @@ export default function App() {
       return next;
     });
   }, []);
-  useEffect(() => { setHideSettledIds(new Set()); }, [todayStr]);
+  useEffect(() => {
+    if (settings.doneDisplay !== 'hide' || !isCurrentDay) {
+      setHideSettledIds(new Set());
+      return;
+    }
+    const ds = todayStr;
+    setHideSettledIds(() => {
+      const next = new Set<string>();
+      for (const h of habitsRef.current) {
+        if (isHandledToday(h, ds)) next.add(h.id);
+      }
+      return next;
+    });
+  }, [todayStr, settings.doneDisplay, isCurrentDay]);
 
   type BoardRow =
     | { kind: 'section'; section: BoardSection }
@@ -3003,14 +3020,16 @@ export default function App() {
     const habitMap = new Map(habits.map(h => [h.id, h]));
     const secMap = new Map(sections.map(s => [s.id, s]));
     const showAll = editMode || showAllHabits;
-    const hideSettled = settings.doneDisplay === 'hide' && isCurrentDay && !showAll;
+    // Hide-mode drops settled habits from the board (and their empty section headers)
+    // even if the eyeball is on — completed rows already render as null.
+    const hideSettled = settings.doneDisplay === 'hide' && isCurrentDay && !editMode;
     const visibleIds = new Set(
       habits
         .filter(h => {
           if (h.archived) return false;
+          if (hideSettled && hideSettledIds.has(h.id) && isHandledToday(h, todayStr)) return false;
           if (showAll) return true;
           if (!isDue(h, todayStr)) return false;
-          if (hideSettled && hideSettledIds.has(h.id) && isHandledToday(h, todayStr)) return false;
           return true;
         })
         .map(h => h.id),
@@ -3029,7 +3048,8 @@ export default function App() {
           }
           return false;
         })();
-        if (showAll || hasVisibleBelow || (editMode && hiddenOnBoard)) {
+        // Empty sections stay only in edit mode (so you can rename / delete them).
+        if (hasVisibleBelow || editMode) {
           rows.push({ kind: 'section', section: sec });
         }
         continue;
