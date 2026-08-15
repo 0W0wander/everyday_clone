@@ -185,46 +185,43 @@ body {
 }
 .board-streak.zero { color: #94a3b8; background: #f8fafc; border-color: #e2e8f0; font-weight: 600; }
 
-.date-quote-flash {
-  position: fixed;
-  z-index: 11000;
-  transform: translateX(-50%);
+.date-row-quote {
+  grid-column: 2 / -1;
+  grid-row: 1;
+  z-index: 4;
+  min-width: 0;
   pointer-events: none;
-  min-width: 160px;
-  background: #fffbeb;
-  border: 1px solid #fde68a;
-  border-radius: 10px;
-  padding: 8px 12px;
-  box-shadow: 0 10px 28px rgba(0,0,0,0.14), 0 2px 8px rgba(0,0,0,0.06);
+  background: #fff;
+  border-bottom: 1px solid #e2e8f0;
   display: flex;
-  flex-direction: column;
-  gap: 2px;
-  animation: date-quote-pop 2.4s ease both;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 14px;
+  animation: date-row-quote-flash 2.4s ease both;
 }
-.date-quote-text {
+.date-row-quote-text {
   font-size: 12px;
-  line-height: 1.35;
+  line-height: 1.25;
   color: #0f172a;
   font-style: italic;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
 }
-.date-quote-source {
-  font-size: 10px;
-  color: #b45309;
+.date-row-quote-source {
+  font-size: 11px;
+  color: #64748b;
   font-weight: 700;
-  letter-spacing: 0.01em;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
-@keyframes date-quote-pop {
-  0%   { opacity: 0; transform: translateX(-50%) translateY(-6px) scale(0.96); }
-  8%   { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
+@keyframes date-row-quote-flash {
+  0%   { opacity: 0; }
+  10%  { opacity: 1; }
   78%  { opacity: 1; }
-  100% { opacity: 0; transform: translateX(-50%) translateY(-4px) scale(0.98); }
-}
-.date-header.quote-flashing {
-  animation: date-header-flash 0.7s ease;
-}
-@keyframes date-header-flash {
-  0%   { background: #fef9c3; }
-  100% { background: #fff; }
+  100% { opacity: 0; }
 }
 
 @media (max-width: 639px) {
@@ -276,7 +273,7 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 6px;
-  padding: 6px 8px 6px 12px;
+  padding: 3px 8px 3px 12px;
   border-right: 1px solid #e2e8f0;
   position: sticky;
   left: 0;
@@ -307,28 +304,24 @@ body {
 .edit-mode-btn.active { background: #eff6ff; color: #2563eb; border-color: #bfdbfe; }
 
 .date-header {
-  display: flex; flex-direction: column; align-items: center; justify-content: flex-end;
-  padding: 5px 2px 6px; gap: 2px; color: #64748b;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  padding: 2px 1px 3px; gap: 0; color: #64748b;
 }
 .today-header { color: #16a34a; }
-.d-month { font-size: 9px; font-weight: 600; line-height: 1; text-transform: uppercase; letter-spacing: 0.05em; }
-.d-num { font-size: 14px; font-weight: 700; line-height: 1; color: #1e293b; }
-.d-day { font-size: 9px; color: #94a3b8; line-height: 1; font-weight: 600; letter-spacing: 0.05em; }
+.d-month { font-size: 8px; font-weight: 600; line-height: 1.15; text-transform: uppercase; letter-spacing: 0.05em; }
+.d-num { font-size: 12px; font-weight: 700; line-height: 1.2; color: #1e293b; }
+.d-day { font-size: 8px; color: #94a3b8; line-height: 1.15; font-weight: 600; letter-spacing: 0.05em; }
+.today-header .d-num {
+  color: #16a34a;
+  font-weight: 800;
+}
 .today-header .d-day { color: #86efac; }
 
-.today-circle {
-  width: 30px; height: 30px;
-  background: #16a34a; color: #fff;
-  border-radius: 50%;
-  display: flex; align-items: center; justify-content: center;
-  font-size: 14px; font-weight: 800; line-height: 1;
-}
-
 .stat-header {
-  font-size: 8px; font-weight: 700; letter-spacing: 0.05em; color: #94a3b8;
-  text-align: center; line-height: 1.35; text-transform: lowercase;
-  display: flex; flex-direction: column; align-items: center; justify-content: flex-end;
-  padding: 5px 2px 6px;
+  font-size: 7px; font-weight: 700; letter-spacing: 0.05em; color: #94a3b8;
+  text-align: center; line-height: 1.2; text-transform: lowercase;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  padding: 2px 1px 3px;
   border-left: 1px solid #e2e8f0;
 }
 
@@ -1768,13 +1761,13 @@ body {
   .edit-icon-btn { opacity: 1; padding: 2px; }
   .edit-icon-btn svg { width: 11px; height: 11px; }
 
-  .date-header { padding: 4px 1px 5px; }
-  .d-month { font-size: 8px; }
-  .d-num   { font-size: 12px; }
-  .d-day   { font-size: 8px; }
-  .today-circle { width: 26px; height: 26px; font-size: 12px; }
+  .date-header { padding: 2px 1px 2px; }
+  .d-month { font-size: 7px; }
+  .d-num   { font-size: 11px; }
+  .d-day   { font-size: 7px; }
+  .today-header .d-num { color: #16a34a; }
 
-  .stat-header { font-size: 7px; padding: 4px 1px 5px; }
+  .stat-header { font-size: 6px; padding: 2px 1px 2px; }
   .stat-num    { font-size: 11px; }
   .stat-rate   { font-size: 10px; }
   .cell-rate   { font-size: 8px; top: 2px; }

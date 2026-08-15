@@ -2182,39 +2182,6 @@ const DailyProgress = memo(function DailyProgress({ pips }: { pips: DayPip[] }) 
   );
 });
 
-function DateQuoteFlash({
-  ds, quote, nonce, onDone,
-}: {
-  ds: string; quote: Quote; nonce: number; onDone: () => void;
-}) {
-  const [pos, setPos] = useState<{ top: number; left: number; maxW: number } | null>(null);
-
-  useLayoutEffect(() => {
-    const el = document.querySelector(`[data-date-header="${ds}"]`);
-    if (!el) { onDone(); return; }
-    const r = el.getBoundingClientRect();
-    const vw = window.innerWidth;
-    const maxW = Math.min(300, vw - 16);
-    const left = Math.max(8 + maxW / 2, Math.min(vw - 8 - maxW / 2, r.left + r.width / 2));
-    setPos({ top: r.bottom + 6, left, maxW });
-    const t = setTimeout(onDone, 2400);
-    return () => clearTimeout(t);
-  }, [ds, nonce, onDone]);
-
-  if (!pos) return null;
-  return createPortal(
-    <div
-      key={nonce}
-      className="date-quote-flash"
-      style={{ top: pos.top, left: pos.left, maxWidth: pos.maxW }}
-    >
-      <span className="date-quote-text">{quote.text}</span>
-      <span className="date-quote-source">{'\u2014 '}{quote.source}</span>
-    </div>,
-    document.body,
-  );
-}
-
 // ─── MoneyMenu — top-right balance with a hover "spend" popover ──────────────
 
 const MoneyMenu = memo(function MoneyMenu(
@@ -2401,7 +2368,12 @@ export default function App() {
   const [showMemory, setShowMemory] = useState(false);
   const [quoteFlash, setQuoteFlash] = useState<{ ds: string; quote: Quote; nonce: number } | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const clearQuoteFlash = useCallback(() => setQuoteFlash(null), []);
+
+  useEffect(() => {
+    if (!quoteFlash) return;
+    const t = setTimeout(() => setQuoteFlash(null), 2400);
+    return () => clearTimeout(t);
+  }, [quoteFlash]);
 
   useEffect(() => { saveSettings(settings); }, [settings]);
 
@@ -3222,15 +3194,6 @@ export default function App() {
         </div>
         <DailyProgress pips={todayPips} />
       </header>
-      {quoteFlash && (
-        <DateQuoteFlash
-          key={quoteFlash.nonce}
-          ds={quoteFlash.ds}
-          quote={quoteFlash.quote}
-          nonce={quoteFlash.nonce}
-          onDone={clearQuoteFlash}
-        />
-      )}
 
       {/* ── Sync toast ── */}
       {syncToast && (
@@ -3259,16 +3222,10 @@ export default function App() {
 
             {dates.map((d, i) => {
               const isTd = isCurrentDay && i === dates.length - 1;
-              const ds = fmt(d);
               return (
-                <div
-                  key={`dh-${i}`}
-                  data-date-header={ds}
-                  className={`cell ch date-header${isTd ? ' today-header' : ''}${quoteFlash?.ds === ds ? ' quote-flashing' : ''}`}
-                >
+                <div key={`dh-${i}`} className={`cell ch date-header${isTd ? ' today-header' : ''}`}>
                   <span className="d-month">{MONTHS[d.getMonth()]}</span>
-                  {isTd ? <span className="today-circle">{d.getDate()}</span>
-                        : <span className="d-num">{d.getDate()}</span>}
+                  <span className="d-num">{d.getDate()}</span>
                   <span className="d-day">{DAYS[d.getDay()]}</span>
                 </div>
               );
@@ -3281,6 +3238,13 @@ export default function App() {
                 ))}
               </div>
             ))}
+
+            {quoteFlash && (
+              <div key={quoteFlash.nonce} className="date-row-quote">
+                <span className="date-row-quote-text">{quoteFlash.quote.text}</span>
+                <span className="date-row-quote-source">{'\u2014 '}{quoteFlash.quote.source}</span>
+              </div>
+            )}
 
             {/* ─ Board rows: sections + habits ─ */}
             {boardRows.map(row => {
