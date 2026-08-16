@@ -607,6 +607,49 @@ function perfectDayBonusTotal(habits: Habit[], isDue: DueFn): number {
   return n * PERFECT_DAY_BONUS;
 }
 
+/** How many recent due-days in a row were imperfect (not all actually completed). */
+const FOCUS_FAIL_DAYS = 6;
+const FOCUS_DISMISS_KEY = 'everyday-focus-dismiss-v1';
+
+function countConsecutiveImperfectDays(habits: Habit[], isDue: DueFn, max = FOCUS_FAIL_DAYS): number {
+  const active = habits.filter(h => !h.archived);
+  if (active.length === 0) return 0;
+  const d = todayNoon();
+  d.setDate(d.getDate() - 1); // start yesterday — today may still be in progress
+  let failed = 0;
+  let scanned = 0;
+  while (failed < max && scanned < 90) {
+    scanned += 1;
+    const ds = fmt(d);
+    d.setDate(d.getDate() - 1);
+    const due = active.filter(h => isDue(h, ds));
+    if (due.length === 0) continue;
+    if (due.every(h => h.completions.includes(ds))) break;
+    failed += 1;
+  }
+  return failed;
+}
+
+function loadFocusDismissedOn(): string | null {
+  try {
+    const raw = localStorage.getItem(FOCUS_DISMISS_KEY);
+    return raw && /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : null;
+  } catch { return null; }
+}
+
+function saveFocusDismissedOn(ds: string | null) {
+  try {
+    if (ds) localStorage.setItem(FOCUS_DISMISS_KEY, ds);
+    else localStorage.removeItem(FOCUS_DISMISS_KEY);
+  } catch { /* noop */ }
+}
+
+function shouldAutoOpenFocus(failedDays: number, dismissedOn: string | null, todayStr: string): boolean {
+  if (failedDays < FOCUS_FAIL_DAYS) return false;
+  if (!dismissedOn) return true;
+  return daysBetween(dismissedOn, todayStr) >= 7;
+}
+
 
 function intensityIdx(s: number): number {
   if (s <= 1) return 0; if (s <= 2) return 1; if (s <= 4) return 2;
@@ -726,7 +769,7 @@ function sanitize(h: Partial<Habit>): Habit {
     activeLevel: (typeof h.activeLevel === 'number' && isFinite(h.activeLevel) && h.activeLevel >= 0) ? Math.floor(h.activeLevel) : undefined,
     schedule:    sanitizeSchedule(h.schedule),
     isBreak:  !!h.isBreak,
-    archived: false, // archival removed — resurrect any previously archived habits
+    archived: !!h.archived,
     comments: (h.comments && typeof h.comments === 'object' && !Array.isArray(h.comments))
       ? Object.fromEntries(
           Object.entries(h.comments as Record<string, unknown>)
@@ -1369,12 +1412,13 @@ interface EditPanelProps {
   onSave:     (name: string, color: HabitColor, price: number, levels: HabitLevel[], schedule: HabitSchedule | undefined) => void;
   onCancel:   () => void;
   onDelete:   () => void;
+  onArchive:  () => void;
 }
 
 // Draft level row in the editor — price kept as string for free typing
 interface LevelDraft { name: string; price: string; }
 
-function EditPanel({ habit, onSave, onCancel, onDelete }: EditPanelProps) {
+function EditPanel({ habit, onSave, onCancel, onDelete, onArchive }: EditPanelProps) {
   const [color, setColor] = useState<string>(habit.color);
   // Levels draft always includes the base level as row 0 (habit name + price).
   const [levels, setLevels] = useState<LevelDraft[]>(() => [
@@ -1562,6 +1606,9 @@ function EditPanel({ habit, onSave, onCancel, onDelete }: EditPanelProps) {
       <div className="edit-panel-actions">
         <button className="btn-save" onClick={handleSave}>Save</button>
         <button className="btn-cancel" onClick={onCancel}>Cancel</button>
+        <button className="btn-archive" onClick={onArchive} title="Archive habit">
+          <BoxArchiveIcon />
+        </button>
         <button className="btn-delete" onClick={onDelete} title="Delete habit">
           <TrashIcon />
         </button>
@@ -2268,6 +2315,221 @@ const MoneyMenu = memo(function MoneyMenu(
   );
 });
 
+// ─── ArchivePanel — restore or permanently delete parked habits ──────────────
+
+function ArchivePanel({
+  archivedHabits, onRestore, onDeleteForever, onOpenFocus, onClose,
+}: {
+  archivedHabits: Habit[];
+  onRestore: (id: string) => void;
+  onDeleteForever: (id: string) => void;
+  onOpenFocus: () => void;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [onClose]);
+
+  return createPortal(
+    <div className="archive-overlay" onClick={onClose}>
+      <div className="archive-panel" onClick={e => e.stopPropagation()}>
+        <div className="archive-panel-header">
+          <div className="archive-panel-title-group">
+            <BoxArchiveIcon />
+            <span className="archive-panel-title">Archived habits</span>
+          </div>
+          <button type="button" className="archive-close-btn" onClick={onClose}>✕</button>
+        </div>
+        <p className="history-hint">
+          Parked habits stay out of streaks and today’s board. Restore them when you’re ready —
+          or open the focus wizard to choose your active set in one pass.
+        </p>
+        <button type="button" className="focus-open-btn" onClick={onOpenFocus}>
+          Open focus wizard…
+        </button>
+        {archivedHabits.length === 0 ? (
+          <p className="archive-empty">Nothing archived yet.</p>
+        ) : (
+          <ul className="archive-list">
+            {archivedHabits.map(h => (
+              <li key={h.id} className="archive-item">
+                <span className="archive-color-dot" style={{ background: h.color }} />
+                <span className="archive-item-name">{h.name}</span>
+                <button type="button" className="btn-restore" onClick={() => onRestore(h.id)}>
+                  Restore
+                </button>
+                <button
+                  type="button"
+                  className="btn-delete-perm"
+                  title="Delete permanently"
+                  onClick={() => {
+                    if (window.confirm(`Permanently delete “${h.name}”?`)) onDeleteForever(h.id);
+                  }}
+                >
+                  <TrashIcon />
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+// ─── FocusWizard — keep a comfortable subset; archive the rest ───────────────
+
+function FocusWizard({
+  habits,
+  autoPrompt,
+  failedDays,
+  onApply,
+  onClose,
+}: {
+  habits: Habit[];
+  autoPrompt: boolean;
+  failedDays: number;
+  onApply: (keepIds: Set<string>) => void;
+  onClose: () => void;
+}) {
+  const [keep, setKeep] = useState<Set<string>>(
+    () => new Set(habits.filter(h => !h.archived).map(h => h.id)),
+  );
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [onClose]);
+
+  const toggle = (id: string) => {
+    setKeep(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const active = habits.filter(h => !h.archived);
+  const parked = habits.filter(h => h.archived);
+  const keepCount = keep.size;
+  const willArchive = active.filter(h => !keep.has(h.id)).length;
+  const willRestore = parked.filter(h => keep.has(h.id)).length;
+
+  return createPortal(
+    <div className="archive-overlay" onClick={onClose}>
+      <div className="archive-panel focus-wizard" onClick={e => e.stopPropagation()}>
+        <div className="archive-panel-header">
+          <div className="archive-panel-title-group">
+            <FocusIcon />
+            <span className="archive-panel-title">
+              {autoPrompt ? 'Scale back for now?' : 'Focus your habits'}
+            </span>
+          </div>
+          <button type="button" className="archive-close-btn" onClick={onClose}>✕</button>
+        </div>
+
+        <p className="history-hint">
+          {autoPrompt
+            ? `You’ve missed a full day-clear for ${failedDays} days in a row. Keep only the habits you feel solid on — park the rest in archive and bring them back when you’re ready.`
+            : 'Check the habits you want on the board right now. Unchecked habits go to archive (streaks pause for them until you restore).'}
+        </p>
+
+        <div className="focus-actions-row">
+          <button type="button" className="focus-mini-btn" onClick={() => setKeep(new Set(habits.map(h => h.id)))}>
+            Keep all
+          </button>
+          <button
+            type="button"
+            className="focus-mini-btn"
+            onClick={() => setKeep(new Set(habits.filter(h => !h.archived).map(h => h.id)))}
+          >
+            Current only
+          </button>
+          <button type="button" className="focus-mini-btn" onClick={() => setKeep(new Set())}>
+            Clear
+          </button>
+        </div>
+
+        {active.length > 0 && (
+          <div className="focus-group">
+            <span className="focus-group-label">On the board</span>
+            <ul className="focus-list">
+              {active.map(h => (
+                <li key={h.id}>
+                  <label className={`focus-item${keep.has(h.id) ? ' is-on' : ''}`}>
+                    <input
+                      type="checkbox"
+                      checked={keep.has(h.id)}
+                      onChange={() => toggle(h.id)}
+                    />
+                    <span className="archive-color-dot" style={{ background: h.color }} />
+                    <span className="focus-item-name">{h.name}</span>
+                    {!keep.has(h.id) && <span className="focus-tag">will archive</span>}
+                  </label>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {parked.length > 0 && (
+          <div className="focus-group">
+            <span className="focus-group-label">Archived — restore when ready</span>
+            <ul className="focus-list">
+              {parked.map(h => (
+                <li key={h.id}>
+                  <label className={`focus-item${keep.has(h.id) ? ' is-on' : ''}`}>
+                    <input
+                      type="checkbox"
+                      checked={keep.has(h.id)}
+                      onChange={() => toggle(h.id)}
+                    />
+                    <span className="archive-color-dot" style={{ background: h.color }} />
+                    <span className="focus-item-name">{h.name}</span>
+                    {keep.has(h.id) && <span className="focus-tag restore">will restore</span>}
+                  </label>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {habits.length === 0 && (
+          <p className="archive-empty">No habits yet.</p>
+        )}
+
+        <div className="focus-footer">
+          <span className="focus-summary">
+            {keepCount} active
+            {willArchive > 0 ? ` · archive ${willArchive}` : ''}
+            {willRestore > 0 ? ` · restore ${willRestore}` : ''}
+          </span>
+          <div className="focus-footer-btns">
+            <button type="button" className="btn-cancel" onClick={onClose}>
+              {autoPrompt ? 'Not now' : 'Cancel'}
+            </button>
+            <button
+              type="button"
+              className="btn-save"
+              disabled={keepCount === 0}
+              title={keepCount === 0 ? 'Keep at least one habit' : undefined}
+              onClick={() => onApply(keep)}
+            >
+              Apply
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
 // ─── SettingsPanel ────────────────────────────────────────────────────────────
 
 function SettingsPanel({
@@ -2349,6 +2611,9 @@ export default function App() {
   const [showTemplates,  setShowTemplates]  = useState(false);
   const [settings,       setSettings]       = useState<AppSettings>(loadSettings);
   const [showSettings,   setShowSettings]   = useState(false);
+  const [showArchive,    setShowArchive]    = useState(false);
+  const [showFocus,      setShowFocus]      = useState(false);
+  const [focusAuto,      setFocusAuto]      = useState(false);
   const [offset,         setOffset]         = useState(0);
   /** null = closed; 'footer' / 'end' append among active; otherwise insert before that board id. */
   const [addPlacement, setAddPlacement] = useState<null | 'footer' | 'end' | string>(null);
@@ -2404,7 +2669,8 @@ export default function App() {
   const dates        = useMemo(() => getVisibleDates(offset, layout.daysBack), [offset, layout.daysBack]);
   const isCurrentDay = offset === 0;
 
-  const visibleHabits = habits;
+  const visibleHabits = useMemo(() => habits.filter(h => !h.archived), [habits]);
+  const archivedHabits = useMemo(() => habits.filter(h => h.archived), [habits]);
 
   useEffect(() => { localStorage.setItem(SPENT_KEY, String(spent)); spentRef.current = spent; }, [spent]);
   useEffect(() => {
@@ -2814,6 +3080,42 @@ export default function App() {
     setEditingId(null);
   }, [editingId]);
 
+  const archiveHabit = useCallback(() => {
+    const id = editingId;
+    if (!id) return;
+    setHabits(prev => prev.map(h => h.id === id ? { ...h, archived: true } : h));
+    setEditingId(null);
+  }, [editingId]);
+
+  const restoreHabit = useCallback((id: string) => {
+    setHabits(prev => prev.map(h => h.id === id ? { ...h, archived: false } : h));
+  }, []);
+
+  const deleteArchivedForever = useCallback((id: string) => {
+    setHabits(prev => prev.filter(h => h.id !== id));
+    setBoardOrder(prev => prev.filter(x => x !== id));
+  }, []);
+
+  const applyFocusKeep = useCallback((keepIds: Set<string>) => {
+    setHabits(prev => prev.map(h => ({ ...h, archived: !keepIds.has(h.id) })));
+    saveFocusDismissedOn(fmt(todayNoon()));
+    setShowFocus(false);
+    setFocusAuto(false);
+    setShowArchive(false);
+  }, []);
+
+  const openFocusWizard = useCallback((auto = false) => {
+    setFocusAuto(auto);
+    setShowFocus(true);
+    setShowArchive(false);
+  }, []);
+
+  const closeFocusWizard = useCallback(() => {
+    if (focusAuto) saveFocusDismissedOn(fmt(todayNoon()));
+    setShowFocus(false);
+    setFocusAuto(false);
+  }, [focusAuto]);
+
   // Manual sync: push current habits and pull remote, with toast feedback
   const syncNow = useCallback(async () => {
     if (!isSyncConfigured()) {
@@ -2950,6 +3252,17 @@ export default function App() {
     [visibleHabits, todayStr, isDue],
   );
   const dayStreak  = useMemo(() => calcDayStreak(visibleHabits, isDue), [visibleHabits, isDue]);
+  const imperfectDays = useMemo(
+    () => countConsecutiveImperfectDays(habits, isDue),
+    [habits, isDue],
+  );
+  // Auto-offer the focus wizard after a stretch of missed day-clears.
+  useEffect(() => {
+    if (showFocus || showArchive || editMode) return;
+    if (!shouldAutoOpenFocus(imperfectDays, loadFocusDismissedOn(), todayStr)) return;
+    setFocusAuto(true);
+    setShowFocus(true);
+  }, [imperfectDays, todayStr, showFocus, showArchive, editMode]);
   // Day is "cleared" once every due habit is marked — done, skip, or fail.
   const todayHandled = useMemo(
     () => visibleHabits.filter(h => isDue(h, todayStr) && isHandledToday(h, todayStr)).length,
@@ -3196,6 +3509,27 @@ export default function App() {
             </button>
             <button
               className="data-btn"
+              onClick={() => openFocusWizard(false)}
+              title="Focus wizard — keep only habits you’re solid on"
+            >
+              <FocusIcon />
+            </button>
+            <button
+              className={`data-btn${archivedHabits.length ? ' has-badge' : ''}`}
+              onClick={() => setShowArchive(true)}
+              title={
+                archivedHabits.length
+                  ? `Archived habits (${archivedHabits.length})`
+                  : 'Archived habits'
+              }
+            >
+              <BoxArchiveIcon />
+              {archivedHabits.length > 0 && (
+                <span className="data-btn-badge">{archivedHabits.length}</span>
+              )}
+            </button>
+            <button
+              className="data-btn"
               onClick={() => setShowSettings(true)}
               title="Settings"
             >
@@ -3232,8 +3566,23 @@ export default function App() {
             <div className="cell ch habits-header">
               <span className="habits-label">HABITS</span>
               <span
-                className={`board-streak${dayStreak > 0 ? '' : ' zero'}`}
-                title="Days in a row with every due habit actually completed (skips don’t count)"
+                className={`board-streak${dayStreak > 0 ? '' : ' zero'}${imperfectDays >= FOCUS_FAIL_DAYS ? ' is-struggling' : ''}`}
+                title={
+                  dayStreak > 0
+                    ? 'Days in a row with every due habit actually completed (skips don’t count)'
+                    : imperfectDays >= FOCUS_FAIL_DAYS
+                      ? `${imperfectDays} imperfect days — click to open the focus wizard`
+                      : 'No day streak yet — click to open the focus wizard'
+                }
+                role="button"
+                tabIndex={0}
+                onClick={() => openFocusWizard(false)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    openFocusWizard(false);
+                  }
+                }}
               >
                 <FlameIcon active={dayStreak > 0} />
                 {dayStreak > 0 ? dayStreak : '—'}
@@ -3417,6 +3766,29 @@ export default function App() {
           onSave={saveEdit}
           onCancel={cancelEdit}
           onDelete={deleteHabit}
+          onArchive={archiveHabit}
+        />
+      )}
+
+      {/* ── Focus wizard (scale back / restore set) ── */}
+      {showFocus && (
+        <FocusWizard
+          habits={habits}
+          autoPrompt={focusAuto}
+          failedDays={imperfectDays}
+          onApply={applyFocusKeep}
+          onClose={closeFocusWizard}
+        />
+      )}
+
+      {/* ── Archive gallery ── */}
+      {showArchive && (
+        <ArchivePanel
+          archivedHabits={archivedHabits}
+          onRestore={restoreHabit}
+          onDeleteForever={deleteArchivedForever}
+          onOpenFocus={() => openFocusWizard(false)}
+          onClose={() => setShowArchive(false)}
         />
       )}
 
@@ -3628,6 +4000,32 @@ function SettingsIcon() {
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
       <circle cx="12" cy="12" r="3" />
       <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
+    </svg>
+  );
+}
+
+function BoxArchiveIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <rect x="2" y="3" width="20" height="5" rx="1"/>
+      <path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/>
+      <path d="M10 12h4"/>
+    </svg>
+  );
+}
+
+function FocusIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="12" r="3"/>
+      <circle cx="12" cy="12" r="8"/>
+      <path d="M12 2v2M12 20v2M2 12h2M20 12h2"/>
     </svg>
   );
 }
