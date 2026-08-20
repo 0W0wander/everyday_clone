@@ -3589,16 +3589,27 @@ export default function App() {
               </span>
             </div>
 
-            {dates.map((d, i) => {
-              const isTd = isCurrentDay && i === dates.length - 1;
-              return (
-                <div key={`dh-${i}`} className={`cell ch date-header${isTd ? ' today-header' : ''}`}>
-                  <span className="d-month">{MONTHS[d.getMonth()]}</span>
-                  <span className="d-num">{d.getDate()}</span>
-                  <span className="d-day">{DAYS[d.getDay()]}</span>
-                </div>
-              );
-            })}
+            {quoteFlash ? (
+              <div
+                key={quoteFlash.nonce}
+                className="cell ch date-row-quote"
+                style={{ gridColumn: `span ${dates.length}` }}
+              >
+                <span className="date-row-quote-text">{quoteFlash.quote.text}</span>
+                <span className="date-row-quote-source">{'\u2014 '}{quoteFlash.quote.source}</span>
+              </div>
+            ) : (
+              dates.map((d, i) => {
+                const isTd = isCurrentDay && i === dates.length - 1;
+                return (
+                  <div key={`dh-${i}`} className={`cell ch date-header${isTd ? ' today-header' : ''}`}>
+                    <span className="d-month">{MONTHS[d.getMonth()]}</span>
+                    <span className="d-num">{d.getDate()}</span>
+                    <span className="d-day">{DAYS[d.getDay()]}</span>
+                  </div>
+                );
+              })
+            )}
 
             {STAT_HEADERS[analyticsView].map((h, i) => (
               <div key={i} className="cell ch stat-header">
@@ -3607,13 +3618,6 @@ export default function App() {
                 ))}
               </div>
             ))}
-
-            {quoteFlash && (
-              <div key={quoteFlash.nonce} className="date-row-quote">
-                <span className="date-row-quote-text">{quoteFlash.quote.text}</span>
-                <span className="date-row-quote-source">{'\u2014 '}{quoteFlash.quote.source}</span>
-              </div>
-            )}
 
             {/* ─ Board rows: sections + habits ─ */}
             {boardRows.map(row => {
@@ -3877,11 +3881,23 @@ function MoneyIcon() {
 }
 function FlameIcon({ active }: { active: boolean }) {
   return (
-    <svg width="13" height="13" viewBox="0 0 24 24"
+    <svg
+      width="20"
+      height="20"
+      viewBox="0 0 24 24"
       fill={active ? '#f97316' : 'none'}
-      stroke={active ? '#ea580c' : '#94a3b8'} strokeWidth="2"
-      strokeLinecap="round" strokeLinejoin="round">
-      <path d="M8.5 14.5A2.5 2.5 0 0 0 11 17c1.4 0 2.5-1.1 2.5-2.5 0-1-.5-1.8-1-2.5-.5-.7-1-1.5-1-2.5 0-1.5 1-3 1-3s-3 1-4.5 3.5C7 9.7 6 11 6 13a6 6 0 0 0 12 0c0-2.5-1.5-4.5-2.5-6"/>
+      stroke={active ? '#ea580c' : '#94a3b8'}
+      strokeWidth="1.75"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M12 3c2 3.5 4.5 5.5 4.5 9.2A4.5 4.5 0 0 1 12 21a4.5 4.5 0 0 1-4.5-4.8C7.5 12.5 9.2 9.8 12 3z" />
+      <path
+        d="M12 11.5c1.1 1.4 1.8 2.5 1.8 3.9A1.8 1.8 0 0 1 12 17.2a1.8 1.8 0 0 1-1.8-1.8c0-1.3.7-2.4 1.8-3.9z"
+        fill={active ? '#fdba74' : 'none'}
+        stroke={active ? '#f97316' : '#94a3b8'}
+      />
     </svg>
   );
 }
